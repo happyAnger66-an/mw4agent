@@ -6,4 +6,6 @@
 
 - [OpenClaw Channels 架构与流程](./openclaw-channels-architecture.md)
 - [MW4Agent Channels 实现说明](./mw4agent-channels-implementation.md)
+- [MW4Agent Telegram 通道架构与实现](./mw4agent-telegram-channel.md)
+- [MW4Agent Webhook 通道架构与实现](./mw4agent-webhook-channel.md)
 

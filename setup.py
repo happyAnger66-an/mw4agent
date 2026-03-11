@@ -12,6 +12,7 @@ setup(
         "fastapi>=0.110.0",
         "uvicorn>=0.27.0",
         "cryptography>=42.0.0",
+        "httpx>=0.26.0",
     ],
     entry_points={
         "console_scripts": [
