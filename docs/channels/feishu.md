@@ -126,10 +126,9 @@ FeishuChannel.deliver()  → 调用 Feishu Open API 发送消息/卡片
 ### 阶段 2：入站 Webhook/事件接入
 
 6. **FastAPI Webhook 入口**
-   - [ ] 在 `FeishuChannel.run_monitor` 中：
-     - 构建或重用 FastAPI 应用；
-     - 注册 `POST /feishu/webhook` 路由；
-     - 处理 Feishu 的 URL 验证（challenge）。
+   - [x] 在 `FeishuChannel.run_monitor` 中集成 FastAPI 应用：
+     - 注册 `POST /feishu/webhook` 路由（默认），处理 `url_verification`；
+     - 将 message event 解析为 `InboundContext` 并交给 dispatcher。
 
 7. **事件解析与上下文映射**
    - [ ] 实现 `parse_feishu_message_event(event)`：
@@ -139,26 +138,34 @@ FeishuChannel.deliver()  → 调用 Feishu Open API 发送消息/卡片
      - `was_mentioned` → p2p 默认 True，群聊后续基于 mention 解析；
      - `command_authorized` → 后续挂钩指令/权限系统。
 
-### 阶段 3：对标 OpenClaw 插件的增强能力
+### 阶段 3：对标 OpenClaw 插件的增强能力（进行中）
 
-8. **多账号支持**
+8. **长连接 WebSocket 模式（官方 SDK 对齐）**
+   - [x] 在 `FeishuChannel` 中增加 `connection_mode` 字段，支持 `"webhook"` 和 `"websocket"` 两种模式；
+   - [x] 在 CLI 中通过 `mw4agent channels feishu run --mode webhook|websocket` 选择模式；
+   - [ ] 在 `_run_ws_monitor` 中集成官方 SDK（`lark-oapi`）的 WebSocket 事件订阅：
+     - 初始化 SDK 客户端；
+     - 注册事件回调，将 Feishu 事件转换为 `InboundContext`；
+     - 建立并维持长连接，处理 abort/关闭逻辑。
+
+9. **多账号支持**
    - [ ] 设计 mw4agent 的 Feishu 多账号配置结构（对标 `cfg.channels.feishu.accounts`）；
    - [ ] 新建 `mw4agent/feishu/accounts.py`：
      - `get_feishu_account_ids(cfg)` / `get_feishu_account(cfg, account_id)` / `get_enabled_feishu_accounts(cfg)`；
      - 用于 `FeishuClient` 和 `FeishuChannel` 选择正确的账号（如 prod/uat）。
 
-9. **mention/command 解析**
+10. **mention/command 解析**
    - [x] 在 Feishu inbound 解析中：基于 `chat_type` + 文本包含 `@`/`＠` 做简易 `was_mentioned` 决策（直聊默认 True，群聊有 @ 才触发）。
    - [ ] 后续识别 @Bot、自定义命令（如 `/feishu_diagnose`），设置更精细的 `was_mentioned` 和 `command_authorized`；
    - [ ] 必要时增加 mention gating 策略，配合 `mention_gating.resolve_mention_gating`。
 
-10. **卡片与富媒体支持**
+11. **卡片与富媒体支持**
     - [ ] 在 `feishu_outbound.send_payload` 中：
       - 支持 `payload.channel_data["feishu"]["card"]`；
       - 复刻“文本 + card + 多媒体”编排逻辑；
     - [ ] 提供 `build_markdown_card(text)` 帮助函数，对标 JS 的 `buildMarkdownCard`。
 
-11. **OAuth/授权（中后期）**
+12. **OAuth/授权（中后期）**
     - [ ] 在 mw4agent 的工具系统中增加 `feishu_oauth` 工具：
       - 仅暴露安全动作（如 revoke），不返回 token 明文；
     - [ ] 参考 OpenClaw `executeAuthorize`：
@@ -167,10 +174,12 @@ FeishuChannel.deliver()  → 调用 Feishu Open API 发送消息/卡片
 
 ### 阶段 4：文档与测试
 
-12. **文档**
+### 阶段 4：文档与测试
+
+13. **文档**
    - [x] 在本文件基础上记录端到端链路与实现规划，并随着实现进展更新勾选状态。
 
-13. **测试**
+14. **测试**
    - [x] 添加基础测试用例：
      - `tests/test_feishu_channel_basic.py`：验证 `FeishuChannel.deliver` 在缺失 `chat_id` 时会打印到 stdout；
    - [ ] 后续完善：

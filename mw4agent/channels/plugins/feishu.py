@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -30,12 +30,14 @@ class FeishuChannel(ChannelPlugin):
     host: str = "0.0.0.0"
     port: int = 8081
     path: str = "/feishu/webhook"
+    connection_mode: Literal["webhook", "websocket"] = "webhook"
 
     def __init__(
         self,
         host: str = "0.0.0.0",
         port: int = 8081,
         path: str = "/feishu/webhook",
+        connection_mode: Literal["webhook", "websocket"] = "webhook",
     ) -> None:
         caps = ChannelCapabilities(
             chat_types=("direct", "group", "channel", "thread"),
@@ -54,15 +56,26 @@ class FeishuChannel(ChannelPlugin):
         object.__setattr__(self, "port", int(port))
         norm_path = path if path.startswith("/") else f"/{path}"
         object.__setattr__(self, "path", norm_path)
+        object.__setattr__(self, "connection_mode", connection_mode)
 
         super().__init__(id="feishu", meta=meta, capabilities=caps, dock=dock)
 
     async def run_monitor(self, *, on_inbound: InboundHandler) -> None:
-        """启动 Feishu Webhook（事件订阅）监听服务。
+        """启动 Feishu 监控。
 
-        - URL 验证: 处理 `url_verification` 请求，返回 challenge
-        - 消息事件: 将 Feishu message event 转换为 InboundContext 后交给 dispatcher
+        根据 connection_mode 决定使用：
+        - "webhook": HTTP 回调（当前已实现）
+        - "websocket": 官方 SDK 长连接（当前仅占位，待集成 lark-oapi）
         """
+        if self.connection_mode == "webhook":
+            await self._run_webhook_monitor(on_inbound=on_inbound)
+        elif self.connection_mode == "websocket":
+            await self._run_ws_monitor(on_inbound=on_inbound)
+        else:  # pragma: no cover - 防御性分支
+            raise RuntimeError(f"Unsupported Feishu connection_mode: {self.connection_mode}")
+
+    async def _run_webhook_monitor(self, *, on_inbound: InboundHandler) -> None:
+        """启动 Feishu Webhook（事件订阅）监听服务。"""
 
         app = FastAPI(title="MW4Agent Feishu Channel")
 
@@ -178,6 +191,21 @@ class FeishuChannel(ChannelPlugin):
             asyncio.run(server.serve())
 
         await loop.run_in_executor(None, _run_server)
+
+    async def _run_ws_monitor(self, *, on_inbound: InboundHandler) -> None:
+        """占位实现：官方 SDK WebSocket 长连接模式。
+
+        设计目标：
+        - 使用 lark-oapi（官方 Python SDK）建立长连接；
+        - 在事件回调中将 Feishu 事件转换为 InboundContext 后调用 on_inbound。
+
+        当前版本仅给出错误提示和文档指引，避免误用。
+        """
+        raise RuntimeError(
+            "FeishuChannel(connection_mode='websocket') 尚未在 mw4agent 中实现。\n"
+            "建议：使用 connection_mode='webhook' 运行，或参考 docs/channels/openclaw_feishu.plugin.md "
+            "与 Feishu 官方文档（lark-oapi）自行扩展长连接集成。"
+        )
 
     async def deliver(self, payload: OutboundPayload) -> None:
         """Send outbound payload to Feishu.

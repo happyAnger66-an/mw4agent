@@ -85,16 +85,36 @@ def register_channels_cli(program: click.Group, _ctx) -> None:
     def feishu_group() -> None:
         pass
 
-    @feishu_group.command(name="run-webhook", help="Run the Feishu webhook channel server")
+    @feishu_group.command(name="run", help="Run the Feishu channel server (webhook or websocket)")
     @click.option("--session-file", default="mw4agent.sessions.json", show_default=True)
     @click.option("--host", default="0.0.0.0", show_default=True, help="Feishu webhook server host")
     @click.option("--port", default=8081, show_default=True, type=int, help="Feishu webhook server port")
     @click.option("--path", default="/feishu/webhook", show_default=True, help="Feishu webhook path")
-    def run_feishu_webhook(session_file: str, host: str, port: int, path: str) -> None:
+    @click.option(
+        "--mode",
+        type=click.Choice(["webhook", "websocket"], case_sensitive=False),
+        default="webhook",
+        show_default=True,
+        help="Feishu connection mode (webhook or websocket)",
+    )
+    def run_feishu(
+        session_file: str,
+        host: str,
+        port: int,
+        path: str,
+        mode: str,
+    ) -> None:
         async def _run() -> None:
             registry = get_channel_registry()
             if not registry.get_plugin("feishu"):
-                registry.register_plugin(FeishuChannel(host=host, port=port, path=path))
+                registry.register_plugin(
+                    FeishuChannel(
+                        host=host,
+                        port=port,
+                        path=path,
+                        connection_mode=mode.lower(),  # type: ignore[arg-type]
+                    )
+                )
 
             session_manager = SessionManager(session_file)
             runner = AgentRunner(session_manager)
