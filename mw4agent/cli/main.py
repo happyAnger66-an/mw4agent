@@ -6,6 +6,7 @@ from typing import Optional, List
 from .context import ProgramContext, create_program_context
 from .registry import get_registry, CommandEntry
 from .gateway import register_gateway_cli
+from .channels.register import register_channels_cli
 from .. import __version__
 
 
@@ -66,6 +67,18 @@ def register_core_commands(program: click.Group, ctx: ProgramContext) -> None:
         register=register_gateway_cli,
     )
     get_registry().register_entry(gateway_entry)
+
+    channels_entry = CommandEntry(
+        commands=[
+            {
+                "name": "channels",
+                "description": "Channel adapters and monitors",
+                "has_subcommands": True,
+            }
+        ],
+        register=register_channels_cli,
+    )
+    get_registry().register_entry(channels_entry)
 
 
 def register_commands(

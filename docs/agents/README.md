@@ -5,6 +5,9 @@
 ## 文档列表
 
 - [架构文档](./architecture.md) - 智能体执行系统的完整架构说明
+- [OpenClaw 权限控制分析](./openclaw-permission-control.md) - OpenClaw 执行命令权限控制机制分析
+- [实现状态](./implementation-status.md) - 实现进度跟踪
+- [实现总结](./summary.md) - 实现总结
 
 ## 快速开始
 

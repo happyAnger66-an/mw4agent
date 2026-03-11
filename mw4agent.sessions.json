@@ -1,0 +1,14 @@
+{
+  "sessions": [
+    {
+      "session_id": "console-main",
+      "session_key": "console:main",
+      "agent_id": "main",
+      "created_at": 1773211345822,
+      "updated_at": 1773211350063,
+      "message_count": 2,
+      "total_tokens": 0,
+      "metadata": {}
+    }
+  ]
+}

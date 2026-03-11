@@ -93,4 +93,10 @@ class StreamEvent:
     stream: str  # "assistant" | "tool" | "lifecycle"
     type: str  # event type
     data: Dict[str, Any]
-    timestamp: int
+    timestamp: int = 0
+
+    def __post_init__(self) -> None:
+        if self.timestamp == 0:
+            import time
+
+            self.timestamp = int(time.time() * 1000)
