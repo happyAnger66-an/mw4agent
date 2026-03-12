@@ -25,6 +25,7 @@ from ..tools.registry import get_tool_registry
 from ..queue.manager import CommandQueue
 from ..events.stream import EventStream
 from ...llm import generate_reply, LLMUsage
+from ..skills.snapshot import build_skill_snapshot
 
 
 class AgentRunner:
@@ -177,6 +178,28 @@ class AgentRunner:
 
         started = time.time()
 
+        # --- Attach skills snapshot to session & build prompt --------------
+        skills_snapshot = build_skill_snapshot()
+        skills_prompt = ''
+        if skills_snapshot.get("prompt"):
+            skills_prompt = str(skills_snapshot["prompt"])
+            # Attach snapshot to session metadata (best-effort).
+            try:
+                meta = getattr(session_entry, "metadata", None) or {}
+                meta = dict(meta)
+                meta["skills_snapshot"] = skills_snapshot
+                session_entry.metadata = meta  # type: ignore[attr-defined]
+            except Exception:
+                # Non-critical; do not break the run if anything goes wrong.
+                pass
+
+        base_message = params.message or ""
+        if skills_prompt:
+            composed_for_llm = skills_prompt + "\n\n[User]\n" + base_message
+            params_for_llm = replace(params, message=composed_for_llm)
+        else:
+            params_for_llm = params
+
         # --- Minimal tool-call protocol ------------------------------------
         #
         # If params.message 是一个 JSON 且形如：
@@ -239,11 +262,16 @@ class AgentRunner:
                 + tool_text
             )
 
-            llm_params = replace(params, message=composed_message)
+            if skills_prompt:
+                composed_with_skills = skills_prompt + "\n\n[User]\n" + composed_message
+            else:
+                composed_with_skills = composed_message
+
+            llm_params = replace(params_for_llm, message=composed_with_skills)
             reply_text, provider, model, usage = generate_reply(llm_params)
         else:
             # No tool plan → single-shot LLM call.
-            reply_text, provider, model, usage = generate_reply(params)
+            reply_text, provider, model, usage = generate_reply(params_for_llm)
 
         # Emit final assistant event.
         await self.event_stream.emit(

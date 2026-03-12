@@ -1,0 +1,5 @@
+{
+  "name": "demo_skill",
+  "description": "Test skill that should appear in the LLM prompt."
+}
+

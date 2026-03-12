@@ -25,13 +25,22 @@ class SkillManager:
         """Initialize skill manager.
 
         Args:
-            skills_dir: Base directory for skill files. Defaults to `~/.mw4agent/skills/`.
+            skills_dir: Base directory for skill files.
+
+        Priority:
+        1. Explicit skills_dir argument
+        2. Environment variable MW4AGENT_SKILLS_DIR
+        3. Default: ~/.mw4agent/skills
         """
         if skills_dir:
             self.skills_dir = Path(skills_dir)
         else:
-            home = Path.home()
-            self.skills_dir = home / ".mw4agent" / "skills"
+            env_dir = os.getenv("MW4AGENT_SKILLS_DIR")
+            if env_dir:
+                self.skills_dir = Path(env_dir)
+            else:
+                home = Path.home()
+                self.skills_dir = home / ".mw4agent" / "skills"
         self.skills_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_skill_path(self, name: str) -> Path:
