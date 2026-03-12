@@ -117,6 +117,12 @@ class ChannelDispatcher:
         if not result.payloads:
             return
 
+
+        # Resolve plugin for delivery (direct-mode delivery is handled here).
+        plugin = self.registry.get_plugin(ctx.channel)
+        if not plugin:
+            raise ValueError(f"Unknown channel: {ctx.channel}")
+
         # 将入站上下文的一部分透传到 OutboundPayload.extra，方便插件决定“发到哪里”。
         inbound_for_plugin = {
             "channel": ctx.channel,

@@ -8,5 +8,6 @@
 - [MW4Agent Channels 实现说明](./mw4agent-channels-implementation.md)
 - [MW4Agent Telegram 通道架构与实现](./mw4agent-telegram-channel.md)
 - [MW4Agent Webhook 通道架构与实现](./mw4agent-webhook-channel.md)
+- [ChannelDock：含义与使用场景](./dock.md)：Dock/Plugin 的职责边界与典型使用方式（对比 OpenClaw 与 MW4Agent）
 - [Dispatcher 设计说明](./dispatcher-design.md)：Channels 如何调用 Agent（Gateway RPC vs 直接调用）
 
