@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -193,19 +194,148 @@ class FeishuChannel(ChannelPlugin):
         await loop.run_in_executor(None, _run_server)
 
     async def _run_ws_monitor(self, *, on_inbound: InboundHandler) -> None:
-        """占位实现：官方 SDK WebSocket 长连接模式。
+        """使用官方 SDK (lark-oapi) 建立 WebSocket 长连接并转发事件。
 
-        设计目标：
-        - 使用 lark-oapi（官方 Python SDK）建立长连接；
-        - 在事件回调中将 Feishu 事件转换为 InboundContext 后调用 on_inbound。
-
-        当前版本仅给出错误提示和文档指引，避免误用。
+        要求环境变量：
+        - FEISHU_APP_ID
+        - FEISHU_APP_SECRET
+        - FEISHU_ENCRYPT_KEY（若未加密，可留空）
+        - FEISHU_VERIFICATION_TOKEN
         """
-        raise RuntimeError(
-            "FeishuChannel(connection_mode='websocket') 尚未在 mw4agent 中实现。\n"
-            "建议：使用 connection_mode='webhook' 运行，或参考 docs/channels/openclaw_feishu.plugin.md "
-            "与 Feishu 官方文档（lark-oapi）自行扩展长连接集成。"
+        try:
+            import lark_oapi as lark  # type: ignore[import-not-found]
+        except ImportError as exc:  # pragma: no cover - 环境缺少依赖时的保护
+            raise RuntimeError(
+                "FeishuChannel(connection_mode='websocket') 需要安装 lark-oapi 包。\n"
+                "请先运行: pip install lark-oapi"
+            ) from exc
+
+        app_id = os.getenv("FEISHU_APP_ID")
+        app_secret = os.getenv("FEISHU_APP_SECRET")
+        encrypt_key = os.getenv("FEISHU_ENCRYPT_KEY", "") or ""
+        verification_token = os.getenv("FEISHU_VERIFICATION_TOKEN", "") or ""
+
+        if not app_id or not app_secret:
+            raise RuntimeError(
+                "Feishu WebSocket 模式需要环境变量 FEISHU_APP_ID 和 FEISHU_APP_SECRET。"
+            )
+
+        loop = asyncio.get_running_loop()
+
+        def _handle_im_message(data: Any) -> None:
+            """处理 P2ImMessageReceiveV1 事件，转换为 InboundContext."""
+            try:
+                event = getattr(data, "event", None)
+                if event is None:
+                    return
+                message = getattr(event, "message", None)
+                if message is None:
+                    return
+
+                message_type: str = getattr(message, "message_type", "") or getattr(
+                    message, "msg_type", ""
+                )
+                raw_content: Any = getattr(message, "content", "") or ""
+                text = ""
+
+                if message_type == "text":
+                    try:
+                        content_obj = (
+                            json.loads(raw_content)
+                            if isinstance(raw_content, str)
+                            else raw_content
+                        )
+                        if isinstance(content_obj, dict):
+                            text = str(content_obj.get("text") or "").strip()
+                    except Exception:
+                        text = str(raw_content)
+                else:
+                    text = f"[feishu:{message_type}]"
+
+                if not text:
+                    return
+
+                chat_id: Optional[str] = getattr(message, "chat_id", None)
+                chat_type: str = getattr(message, "chat_type", "p2p") or "p2p"
+                message_id: Optional[str] = getattr(message, "message_id", None) or getattr(
+                    message, "msg_id", None
+                )
+                thread_id: Optional[str] = getattr(message, "thread_id", None)
+
+                sender = getattr(event, "sender", None)
+                sender_open_id: Optional[str] = None
+                if sender is not None:
+                    sender_id_obj = getattr(sender, "sender_id", None)
+                    if sender_id_obj is not None:
+                        sender_open_id = getattr(sender_id_obj, "open_id", None)
+
+                # 映射 chat_type 到 InboundContext.chat_type
+                if chat_type in ("p2p", "private"):
+                    ctx_chat_type = "direct"
+                elif chat_type in ("group", "supergroup"):
+                    ctx_chat_type = "group"
+                else:
+                    ctx_chat_type = "channel"
+
+                if ctx_chat_type == "group":
+                    was_mentioned = "@" in text or "＠" in text
+                else:
+                    was_mentioned = True
+
+                command_authorized = True
+
+                session_chat_id = chat_id or "unknown"
+                session_key = f"feishu:{session_chat_id}"
+                session_id = str(session_chat_id)
+
+                ctx = InboundContext(
+                    channel="feishu",
+                    text=text,
+                    session_key=session_key,
+                    session_id=session_id,
+                    agent_id="main",
+                    chat_type=ctx_chat_type,  # type: ignore[arg-type]
+                    was_mentioned=was_mentioned,
+                    command_authorized=command_authorized,
+                    sender_is_owner=False,
+                    sender_id=str(sender_open_id) if sender_open_id else None,
+                    sender_name=None,
+                    to=None,
+                    thread_id=str(thread_id) if thread_id else None,
+                    timestamp_ms=None,
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "thread_id": thread_id,
+                        "sender_open_id": sender_open_id,
+                        "raw_event": lark.JSON.marshal(data),
+                    },
+                )
+
+                asyncio.run_coroutine_threadsafe(on_inbound(ctx), loop)
+            except Exception as e:  # pragma: no cover - 日志路径
+                print(f"[Feishu WS] error handling message event: {e}")
+
+        # 构建事件分发器
+        event_handler = (
+            lark.EventDispatcherHandler.builder(encrypt_key, verification_token)
+            .register_p2_im_message_receive_v1(_handle_im_message)
+            .build()
         )
+
+        # 创建并启动 WebSocket 客户端（阻塞），放到线程池中运行
+        ws_client = lark.ws.Client(
+            app_id,
+            app_secret,
+            event_handler=event_handler,
+            log_level=lark.LogLevel.DEBUG,
+            app_type=lark.AppType.SELF_BUILD,
+        )
+
+        def _run_ws() -> None:
+            ws_client.start()
+
+        await loop.run_in_executor(None, _run_ws)
 
     async def deliver(self, payload: OutboundPayload) -> None:
         """Send outbound payload to Feishu.
