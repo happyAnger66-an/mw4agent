@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..agents.runner.runner import AgentRunner
@@ -154,21 +154,6 @@ def create_app(*, session_file: str = "mw4agent.sessions.json") -> FastAPI:
     app.state.gateway_state = state
     app.state.session_manager = session_manager
     app.state.agent_runner = runner
-
-    # --- Minimal dashboard SPA (served as static files) ---
-    # The SPA lives in mw4agent/dashboard/static and talks to:
-    # - POST /rpc for Gateway RPC
-    # - WS  /ws  for agent event streams
-    dashboard_static_dir = (
-        Path(__file__).resolve().parent.parent / "dashboard" / "static"
-    )
-    if dashboard_static_dir.is_dir():
-        # Serve the dashboard at "/" (similar to OpenClaw Control UI default).
-        app.mount(
-            "/",
-            StaticFiles(directory=str(dashboard_static_dir), html=True),
-            name="dashboard",
-        )
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:
@@ -320,6 +305,26 @@ def create_app(*, session_file: str = "mw4agent.sessions.json") -> FastAPI:
             return {"id": req_id, "ok": True, "payload": {"path": path, "entries": entries}}
 
         return {"id": req_id, "ok": False, "error": {"code": "method_not_found", "message": f"Unknown method: {method}"}}
+
+    # --- Minimal dashboard SPA (served as static files) ---
+    # The SPA lives in mw4agent/dashboard/static and talks to:
+    # - POST /rpc for Gateway RPC
+    # - WS  /ws  for agent event streams
+    dashboard_static_dir = (
+        Path(__file__).resolve().parent.parent / "dashboard" / "static"
+    )
+    if dashboard_static_dir.is_dir():
+        # Serve the dashboard under /dashboard to avoid intercepting /ws and /rpc.
+        app.mount(
+            "/dashboard",
+            StaticFiles(directory=str(dashboard_static_dir), html=True),
+            name="dashboard",
+        )
+
+        @app.get("/")
+        async def root_redirect() -> RedirectResponse:
+            """Redirect bare `/` to the dashboard entry."""
+            return RedirectResponse(url="/dashboard/")
 
     return app
 
