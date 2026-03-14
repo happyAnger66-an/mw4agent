@@ -119,11 +119,12 @@
       .shell {
         width: 100%;
         max-width: 1120px;
-        margin: 32px auto;
-        padding: 0 16px;
+        margin: 0 auto;
+        padding: 20px 16px 32px;
         display: flex;
         flex-direction: column;
         gap: 18px;
+        min-height: 100vh;
       }
 
       .header {
@@ -156,9 +157,17 @@
       }
 
       .title-text-main {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
         font-size: 18px;
         font-weight: 600;
         letter-spacing: 0.01em;
+      }
+
+      .title-icon {
+        font-size: 22px;
+        line-height: 1;
       }
 
       .title-text-sub {
@@ -273,6 +282,9 @@
         display: grid;
         grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.1fr);
         gap: 16px;
+        flex: 1;
+        min-height: 0;
+        align-items: start;
       }
 
       @media (max-width: 880px) {
@@ -313,18 +325,29 @@
         color: var(--text-muted);
       }
 
+      .main > .panel:first-child {
+        min-height: 50vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .main > .panel:first-child .panel-header {
+        flex-shrink: 0;
+      }
+
       .chat-body {
         padding: 10px 14px 14px;
         display: flex;
         flex-direction: column;
         gap: 10px;
-        min-height: 260px;
+        flex: 1;
+        min-height: 0;
       }
 
       .messages {
         flex: 1;
-        min-height: 160px;
-        max-height: 360px;
+        min-height: 50vh;
+        max-height: 75vh;
         overflow: auto;
         padding: 8px 8px 4px;
         border-radius: var(--radius-md);
@@ -355,6 +378,42 @@
         color: var(--text-muted);
         margin-bottom: 3px;
       }
+
+      .msg-step {
+        font-size: 11px;
+        color: var(--text-muted);
+        margin-bottom: 4px;
+        font-style: italic;
+      }
+
+      .msg-reasoning {
+        display: none;
+        font-size: 12px;
+        color: var(--text-muted);
+        background: var(--bg-subtle, rgba(0,0,0,0.04));
+        border-left: 3px solid var(--border-muted, #ccc);
+        padding: 8px 10px;
+        margin-bottom: 8px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        border-radius: 0 4px 4px 0;
+      }
+      .msg-body {
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .chat-options {
+        margin-bottom: 8px;
+      }
+      .chat-option {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        color: var(--text-muted);
+        cursor: pointer;
+      }
+      .chat-option input { cursor: pointer; }
 
       .chat-input-row {
         display: flex;
@@ -458,6 +517,117 @@
         color: var(--text-muted);
         text-align: right;
       }
+
+      .panel-header-tabs {
+        display: flex;
+        gap: 0;
+        padding-bottom: 0;
+        border-bottom: none;
+      }
+
+      .right-tabs {
+        display: flex;
+        gap: 2px;
+        padding: 0 4px 10px;
+      }
+
+      .right-tab {
+        padding: 6px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        background: none;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+
+      .right-tab:hover {
+        color: var(--text-main);
+        background: var(--accent-soft);
+      }
+
+      .right-tab.active {
+        color: var(--accent);
+        background: var(--accent-soft);
+      }
+
+      .right-panel-content {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        padding: 12px 14px 14px;
+      }
+
+      .right-panel-content.hidden {
+        display: none;
+      }
+
+      .log-panel {
+        flex: 1;
+        min-height: 200px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .log-list {
+        flex: 1;
+        min-height: 180px;
+        max-height: 50vh;
+        overflow: auto;
+        padding: 8px;
+        border-radius: var(--radius-md);
+        background: var(--messages-bg);
+        border: 1px solid var(--messages-border);
+        font-family: ui-monospace, "Cascadia Code", "SF Mono", monospace;
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
+      .log-entry {
+        padding: 6px 8px;
+        margin-bottom: 4px;
+        border-radius: 6px;
+        background: var(--meta-item-bg);
+        border: 1px solid var(--meta-item-border);
+        border-left: 3px solid var(--accent);
+        word-break: break-all;
+      }
+
+      .log-entry:last-child {
+        margin-bottom: 0;
+      }
+
+      .log-entry-time {
+        color: var(--text-muted);
+        font-size: 10px;
+        margin-right: 8px;
+      }
+
+      .log-entry-stream {
+        font-weight: 600;
+        color: var(--accent);
+      }
+
+      .log-entry-run {
+        color: var(--text-muted);
+        font-size: 10px;
+      }
+
+      .log-empty {
+        font-size: 12px;
+        color: var(--text-muted);
+        text-align: center;
+        padding: 24px 12px;
+      }
+
+      .log-empty.hidden {
+        display: none;
+      }
     </style>
   </head>
   <body>
@@ -468,7 +638,7 @@
             <div class="title-mark-inner"></div>
           </div>
           <div>
-            <div class="title-text-main" data-i18n="title">MW4Agent Dashboard</div>
+            <div class="title-text-main"><span class="title-icon" aria-hidden="true">💪</span><span data-i18n="title">MW4Agent Dashboard</span></div>
             <div class="title-text-sub" data-i18n="titleSub">Browser console · Gateway WebSocket + /rpc</div>
           </div>
         </div>
@@ -499,6 +669,12 @@
           </div>
           <div class="chat-body">
             <div class="messages" id="messages"></div>
+            <div class="chat-options">
+              <label class="chat-option">
+                <input type="checkbox" id="reasoning-checkbox" />
+                <span data-i18n="showReasoning">Show reasoning</span>
+              </label>
+            </div>
             <div class="chat-input-row">
               <textarea
                 id="chat-input"
@@ -516,34 +692,44 @@
           </div>
         </section>
 
-        <section class="panel">
-          <div class="panel-header">
-            <div class="panel-title" data-i18n="gateway">Gateway</div>
-            <div class="panel-subtitle" data-i18n="gatewaySubtitle">Live connection state &amp; last run snapshot (minimal skeleton).</div>
+        <section class="panel right-panel">
+          <div class="panel-header panel-header-tabs">
+            <div class="right-tabs">
+              <button type="button" class="right-tab active" data-tab="gateway" data-i18n="gateway">Gateway</button>
+              <button type="button" class="right-tab" data-tab="logs" data-i18n="events">Events</button>
+            </div>
           </div>
-          <div class="meta-panel">
-            <div class="meta-grid">
-              <div class="meta-item">
-                <div class="meta-label" data-i18n="metaWs">WebSocket</div>
-                <div class="meta-value" id="meta-ws" data-i18n="notConnected">Not connected</div>
-              </div>
-              <div class="meta-item">
-                <div class="meta-label" data-i18n="metaRpc">RPC Endpoint</div>
-                <div class="meta-value" id="meta-rpc">N/A</div>
-              </div>
-              <div class="meta-item">
-                <div class="meta-label" data-i18n="metaLastRun">Last run</div>
-                <div class="meta-value" id="meta-run">–</div>
-              </div>
-              <div class="meta-item">
-                <div class="meta-label" data-i18n="metaEvents">Events</div>
-                <div class="meta-value">
-                  <span class="meta-badge"><span id="meta-events-total">0</span> <span id="meta-events-unit" data-i18n="total">total</span></span>
+          <div id="right-panel-gateway" class="right-panel-content">
+            <div class="meta-panel">
+              <div class="meta-grid">
+                <div class="meta-item">
+                  <div class="meta-label" data-i18n="metaWs">WebSocket</div>
+                  <div class="meta-value" id="meta-ws" data-i18n="notConnected">Not connected</div>
+                </div>
+                <div class="meta-item">
+                  <div class="meta-label" data-i18n="metaRpc">RPC Endpoint</div>
+                  <div class="meta-value" id="meta-rpc">N/A</div>
+                </div>
+                <div class="meta-item">
+                  <div class="meta-label" data-i18n="metaLastRun">Last run</div>
+                  <div class="meta-value" id="meta-run">–</div>
+                </div>
+                <div class="meta-item">
+                  <div class="meta-label" data-i18n="metaEvents">Events</div>
+                  <div class="meta-value">
+                    <span class="meta-badge"><span id="meta-events-total">0</span> <span id="meta-events-unit" data-i18n="total">total</span></span>
+                  </div>
                 </div>
               </div>
+              <div class="footer-hint" data-i18n="footerHint">
+                This is a minimal skeleton. You can evolve it into a full Control UI (sessions, channels, skills, cron, etc.).
+              </div>
             </div>
-            <div class="footer-hint" data-i18n="footerHint">
-              This is a minimal skeleton. You can evolve it into a full Control UI (sessions, channels, skills, cron, etc.).
+          </div>
+          <div id="right-panel-logs" class="right-panel-content hidden">
+            <div class="log-panel">
+              <div class="log-list" id="log-list"></div>
+              <div class="log-empty" id="log-empty" data-i18n="noEvents">No events yet.</div>
             </div>
           </div>
         </section>

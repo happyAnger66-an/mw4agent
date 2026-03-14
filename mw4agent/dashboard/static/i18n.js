@@ -11,6 +11,8 @@ const messages = {
     titleSub: "Browser console · Gateway WebSocket + /rpc",
     statusConnected: "CONNECTED",
     statusDisconnected: "DISCONNECTED",
+    statusReconnecting: "RECONNECTING…",
+    reconnecting: "Reconnecting…",
     chat: "Chat",
     chatSubtitle: "Send a message via Gateway RPC and stream assistant events over WebSocket.",
     placeholder: "Type a message to MW4Agent…",
@@ -28,6 +30,15 @@ const messages = {
     metaYou: "you",
     metaAssistant: "assistant",
     metaError: "error",
+    stepThinking: "Thinking…",
+    stepCallingTool: "Calling tool: {name}",
+    stepToolDone: "Tool {name} finished.",
+    reasoningLabel: "Reasoning",
+    showReasoning: "Show reasoning",
+    logs: "Logs",
+    events: "Events",
+    noLogs: "No logs yet.",
+    noEvents: "No events yet.",
     langEn: "English",
     langZh: "中文",
   },
@@ -36,6 +47,8 @@ const messages = {
     titleSub: "浏览器控制台 · Gateway WebSocket + /rpc",
     statusConnected: "已连接",
     statusDisconnected: "未连接",
+    statusReconnecting: "重连中…",
+    reconnecting: "重连中…",
     chat: "聊天",
     chatSubtitle: "通过 Gateway RPC 发送消息，并通过 WebSocket 流式接收助手回复。",
     placeholder: "输入消息发送给 MW4Agent…",
@@ -53,10 +66,30 @@ const messages = {
     metaYou: "你",
     metaAssistant: "助手",
     metaError: "错误",
+    stepThinking: "思考中…",
+    stepCallingTool: "正在调用工具: {name}",
+    stepToolDone: "工具 {name} 已完成。",
+    reasoningLabel: "推理过程",
+    showReasoning: "显示推理过程",
+    logs: "日志",
+    events: "事件",
+    noLogs: "暂无日志",
+    noEvents: "暂无事件",
     langEn: "English",
     langZh: "中文",
   },
 };
+
+/** Replace {name} etc. in template. */
+export function tFormat(key, vars) {
+  let s = t(key);
+  if (vars && typeof vars === "object") {
+    Object.keys(vars).forEach((k) => {
+      s = s.replace(new RegExp(`\\{${k}\\}`, "g"), String(vars[k]));
+    });
+  }
+  return s;
+}
 
 function detectLocale() {
   const stored = localStorage.getItem(STORAGE_KEY);

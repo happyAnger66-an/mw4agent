@@ -5,6 +5,7 @@ Similar to OpenClaw's runEmbeddedPiAgent and pi-embedded-runner.
 """
 
 import asyncio
+import os
 import time
 import uuid
 import json
@@ -22,13 +23,17 @@ from ..types import (
 )
 from ..session.manager import SessionManager
 from ..tools.registry import get_tool_registry
+from ..tools.base import ToolResult
 from ..queue.manager import CommandQueue
 from ..events.stream import EventStream
-from ...llm import generate_reply, LLMUsage
+from ...llm import generate_reply, generate_reply_with_tools, LLMUsage
+from ..reasoning import split_reasoning_and_text
 from ..skills.snapshot import build_skill_snapshot
 
 from mw4agent.log import get_logger
 logger = get_logger(__name__)
+
+MAX_TOOL_ROUNDS = 16
 
 class AgentRunner:
     """
@@ -181,7 +186,7 @@ class AgentRunner:
         started = time.time()
 
         # --- Attach skills snapshot to session & build prompt --------------
-        logger.info(f"Building skills snapshot for session {session_entry.session_id}")
+        #logger.info(f"Building skills snapshot for session {session_entry.session_id}")
         skills_snapshot = build_skill_snapshot()
         skills_prompt = ''
         if skills_snapshot.get("prompt"):
@@ -227,6 +232,7 @@ class AgentRunner:
         except Exception:
             tool_plan = None
 
+        logger.info(f"agent_turn {tool_plan}")
         if tool_plan is not None:
             tool_name = str(tool_plan["tool_name"])
             tool_args = tool_plan.get("tool_args") or {}
@@ -237,16 +243,17 @@ class AgentRunner:
             )
             tool_call_id = str(tool_plan.get("tool_call_id") or uuid.uuid4())
 
-            # Execute tool via shared helper (emits tool stream events).
+            tool_context = {
+                "run_id": run_id,
+                "session_key": params.session_key,
+                "agent_id": params.agent_id,
+                "workspace_dir": params.workspace_dir or os.getcwd(),
+            }
             tool_result = await self.execute_tool(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 params=tool_args,
-                context={
-                    "run_id": run_id,
-                    "session_key": params.session_key,
-                    "agent_id": params.agent_id,
-                },
+                context=tool_context,
             )
 
             if getattr(tool_result, "success", False):
@@ -271,19 +278,52 @@ class AgentRunner:
                 composed_with_skills = composed_message
 
             llm_params = replace(params_for_llm, message=composed_with_skills)
+            await asyncio.sleep(0)
             reply_text, provider, model, usage = generate_reply(llm_params)
         else:
-            # No tool plan → single-shot LLM call.
-            reply_text, provider, model, usage = generate_reply(params_for_llm)
+            # No tool plan → try tool-call loop if we have tools and non-echo provider.
+            tool_definitions = self.tool_registry.get_tool_definitions()
+            tool_context = {
+                "run_id": run_id,
+                "session_key": params.session_key,
+                "agent_id": params.agent_id,
+                "workspace_dir": params.workspace_dir or os.getcwd(),
+            }
+            use_tool_loop = bool(tool_definitions)
+            logger.info(f"agent_turn use_tool_loop: {use_tool_loop}, tool_definitions: {tool_definitions}")
+            if use_tool_loop:
+                reply_text, provider, model, usage = await self._run_tool_loop(
+                    params_for_llm,
+                    tool_definitions,
+                    tool_context,
+                    run_id,
+                )
+            else:
+                await asyncio.sleep(0)
+                reply_text, provider, model, usage = generate_reply(params_for_llm)
 
-        # Emit final assistant event.
+        # Emit assistant event(s): optionally reasoning then text (ReasoningLevel).
+        reasoning_level = (params.reasoning_level or "").strip().lower() or "off"
+        reasoning, text_only = split_reasoning_and_text(reply_text or "")
+        if reasoning_level in ("on", "stream") and reasoning:
+            await self.event_stream.emit(
+                StreamEvent(
+                    stream="assistant",
+                    type="delta",
+                    data={
+                        "run_id": run_id,
+                        "reasoning": reasoning,
+                        "final": False,
+                    },
+                )
+            )
         await self.event_stream.emit(
             StreamEvent(
                 stream="assistant",
                 type="delta",
                 data={
                     "run_id": run_id,
-                    "text": reply_text,
+                    "text": text_only,
                     "final": True,
                 },
             )
@@ -321,6 +361,74 @@ class AgentRunner:
                 usage=usage_dict,
             ),
         )
+
+    async def _run_tool_loop(
+        self,
+        params: AgentRunParams,
+        tool_definitions: List[Dict[str, Any]],
+        tool_context: Dict[str, Any],
+        run_id: str,
+    ) -> tuple:
+        # Returns (reply_text: str, provider: str, model: str, usage: LLMUsage)
+        """Run LLM with tools in a loop until no tool_calls or max rounds. Returns (reply_text, provider, model, usage)."""
+        messages: List[Dict[str, Any]] = []
+        if params.extra_system_prompt:
+            messages.append({
+                "role": "system",
+                "content": params.extra_system_prompt.strip(),
+            })
+        messages.append({"role": "user", "content": params.message or ""})
+
+        reply_text = ""
+        provider = "echo"
+        model = ""
+        usage = LLMUsage()
+        for _ in range(MAX_TOOL_ROUNDS):
+            await asyncio.sleep(0)
+            content, tool_calls, provider, model, usage = generate_reply_with_tools(
+                params, messages, tool_definitions
+            )
+            if not tool_calls:
+                reply_text = content or ""
+                break
+            # Emit tool start/end for each call and collect results.
+            assistant_msg = {
+                "role": "assistant",
+                "content": content or None,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["arguments"], ensure_ascii=False),
+                        },
+                    }
+                    for tc in tool_calls
+                ],
+            }
+            messages.append(assistant_msg)
+            for tc in tool_calls:
+                tid, name, args = tc["id"], tc["name"], tc["arguments"]
+                try:
+                    result = await self.execute_tool(
+                        tool_call_id=tid,
+                        tool_name=name,
+                        params=args,
+                        context=tool_context,
+                    )
+                except Exception as e:
+                    result = ToolResult(success=False, result={}, error=str(e))
+                if result.success:
+                    result_str = json.dumps(result.result, ensure_ascii=False) if isinstance(result.result, dict) else str(result.result)
+                else:
+                    result_str = f"Error: {result.error or result.result}"
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tid,
+                    "content": result_str,
+                })
+        return (reply_text, provider, model, usage)
 
     async def execute_tool(
         self,

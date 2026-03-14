@@ -56,6 +56,8 @@
 - `runId`: string（若不传由 gateway 生成）
 - `sessionKey` / `sessionId` / `agentId`
 - `deliver` / `channel` / `extraSystemPrompt`
+- **`thinkingLevel`**: string，控制模型端扩展思考强度。可选值：`off` | `minimal` | `low` | `medium` | `high` | `xhigh` | `adaptive`（详见 [Thinking 模式](../openclaw/thinking-mode.md)）。
+- **`reasoningLevel`**: string，控制是否向客户端展示推理块。可选值：`off`（隐藏）| `on` | `stream`（流式展示）。
 
 返回：
 

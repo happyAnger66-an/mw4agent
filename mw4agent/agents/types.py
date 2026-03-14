@@ -69,6 +69,10 @@ class AgentRunParams:
     deliver: bool = False
     channel: Optional[str] = None
     images: Optional[List[Dict[str, Any]]] = None
+    """Workspace root for read/write tools; default cwd if not set."""
+    workspace_dir: Optional[str] = None
+    """Reasoning visibility: off (hide) | on | stream. When on/stream, reasoning blocks are emitted and frontend may show them."""
+    reasoning_level: Optional[str] = None
 
 
 @dataclass

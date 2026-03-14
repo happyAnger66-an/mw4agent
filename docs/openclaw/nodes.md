@@ -104,6 +104,7 @@
 - **多 node 管理**：`src/gateway/node-registry.ts`、`src/gateway/server-methods/nodes.ts`（node.list / node.describe / 配对）、`src/gateway/server/ws-connection/message-handler.ts`（register）。
 - **跨 node 执行命令**：`src/gateway/server-methods/nodes.ts`（node.invoke handler）、`src/gateway/node-registry.ts`（invoke / handleInvokeResult）、`src/node-host/runner.ts` 与 `invoke.ts`（收 node.invoke.request、回 node.invoke.result）、`src/agents/tools/nodes-tool.ts` 与 `nodes-utils.ts`（Agent 侧调用）。
 - **MW4Agent 侧文档**：`docs/architecture/gateway/agent_call_gateway.md`（节点面：nodes 工具与 node.invoke）、`docs/openclaw/dashboard.md`（Dashboard 中 node.list 等 RPC 使用）。
+- **工具与技能执行**：`docs/openclaw/tool-and-skill-execution.md`（如何根据用户消息决定执行哪些工具 / skills）。
 
 ---
 

@@ -13,10 +13,17 @@ import json
 import os
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..agents.types import AgentRunParams
 from ..config import get_default_config_manager
+from mw4agent.log import get_logger
+logger = get_logger(__name__)
+
+# One tool call from API: id, name, arguments (JSON string or dict)
+ToolCallPayload = Dict[str, Any]
+# One tool definition for API: name, description, parameters (JSON Schema)
+ToolDefPayload = Dict[str, Any]
 
 
 @dataclass
@@ -121,6 +128,171 @@ def _call_openai_chat(
         total_tokens=usage_obj.get("total_tokens"),
     )
     return text or "", usage
+
+
+def _tools_to_openai_format(tool_definitions: List[ToolDefPayload]) -> List[Dict[str, Any]]:
+    """Convert registry-style tool defs (name, description, parameters) to OpenAI tools array."""
+    out = []
+    for t in tool_definitions:
+        name = t.get("name") or ""
+        desc = t.get("description") or ""
+        params = t.get("parameters")
+        if not isinstance(params, dict):
+            params = {"type": "object", "properties": {}}
+        out.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": desc,
+                "parameters": params,
+            },
+        })
+    return out
+
+
+def _call_openai_chat_with_tools(
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+    *,
+    model: str,
+    api_key: str,
+    base_url: str,
+    timeout_s: float = 60.0,
+) -> Tuple[Optional[str], List[ToolCallPayload], LLMUsage]:
+    """Call OpenAI Chat Completions with tools. Returns (content, tool_calls, usage).
+    tool_calls items are {id, name, arguments} with arguments already parsed to dict.
+    """
+    base = base_url.rstrip("/")
+    if base.endswith("/v1"):
+        url = f"{base}/chat/completions"
+    else:
+        url = f"{base}/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    body = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "temperature": 0.2,
+    }
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    logger.debug(f'llm request {url}')
+    req = urllib.request.Request(url=url, data=data, method="POST", headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        raw = resp.read().decode("utf-8")
+    obj = json.loads(raw)
+    logger.debug(f'llm response {obj}')
+    choice = obj.get("choices", [{}])[0] or {}
+    msg = choice.get("message") or {}
+    content = msg.get("content")
+    if content is not None and not isinstance(content, str):
+        content = str(content)
+    raw_tool_calls = msg.get("tool_calls") or []
+    tool_calls: List[ToolCallPayload] = []
+    for tc in raw_tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        tid = tc.get("id") or ""
+        fn = tc.get("function") or {}
+        name = fn.get("name") or ""
+        args_raw = fn.get("arguments")
+        if isinstance(args_raw, str):
+            try:
+                args = json.loads(args_raw)
+            except json.JSONDecodeError:
+                args = {}
+        elif isinstance(args_raw, dict):
+            args = args_raw
+        else:
+            args = {}
+        tool_calls.append({"id": tid, "name": name, "arguments": args})
+    usage_obj = obj.get("usage") or {}
+    usage = LLMUsage(
+        input_tokens=usage_obj.get("prompt_tokens"),
+        output_tokens=usage_obj.get("completion_tokens"),
+        total_tokens=usage_obj.get("total_tokens"),
+    )
+    return (content, tool_calls, usage)
+
+
+def generate_reply_with_tools(
+    params: AgentRunParams,
+    messages: List[Dict[str, Any]],
+    tool_definitions: List[ToolDefPayload],
+) -> Tuple[Optional[str], List[ToolCallPayload], str, str, LLMUsage]:
+    """One LLM round with tools. Returns (content, tool_calls, provider, model, usage).
+    When provider is echo or tools unsupported, returns (reply_text, [], provider, model, usage).
+    """
+    cfg = _load_llm_config()
+    cfg_provider = ""
+    cfg_model = ""
+    cfg_base_url: Optional[str] = None
+    cfg_api_key: Optional[str] = None
+    if isinstance(cfg, dict):
+        cfg_provider = str(cfg.get("provider") or "").strip().lower()
+        cfg_model = str(cfg.get("model") or cfg.get("model_id") or "").strip()
+        raw_base = str(cfg.get("base_url") or "").strip()
+        cfg_base_url = raw_base or None
+        raw_key = str(cfg.get("api_key") or "").strip()
+        cfg_api_key = raw_key or None
+
+    provider = (
+        params.provider
+        or os.getenv("MW4AGENT_LLM_PROVIDER")
+        or cfg_provider
+        or "echo"
+    ).strip().lower()
+    model = (
+        params.model
+        or os.getenv("MW4AGENT_LLM_MODEL")
+        or cfg_model
+    ).strip()
+
+    if provider in ("", "echo", "debug"):
+        default_model = "gpt-4o-mini"
+        reply = f"Agent (echo) reply: {params.message}"
+        return reply, [], "echo", model or default_model, LLMUsage()
+
+    spec = _OPENAI_COMPAT_SPECS.get(provider)
+    if spec and not model:
+        model = spec.default_model or ""
+    if spec is None:
+        reply = f"Agent (unknown-provider:{provider}) reply: {params.message}"
+        return reply, [], provider or "echo", model or "gpt-4o-mini", LLMUsage()
+
+    base_url = cfg_base_url or os.getenv("MW4AGENT_LLM_BASE_URL", "").strip() or (spec.default_base_url or "")
+    if spec.base_url_required and not base_url:
+        reply = f"Agent (echo:no-base-url:{provider}) reply: {params.message}"
+        return reply, [], "echo", model, LLMUsage()
+    api_key = (cfg_api_key or os.getenv(spec.api_key_env, "").strip() or "")
+    if spec.require_api_key and not api_key:
+        reply = f"Agent (echo:no-api-key:{provider}) reply: {params.message}"
+        return reply, [], "echo", model, LLMUsage()
+
+    tools_openai = _tools_to_openai_format(tool_definitions)
+    if not tools_openai:
+        reply, usage = _call_openai_chat(
+            params.message,
+            model=model or spec.default_model or "gpt-4o-mini",
+            api_key=api_key or "none",
+            base_url=base_url,
+        )
+        return reply, [], provider, model or spec.default_model, usage
+
+    try:
+        content, tool_calls, usage = _call_openai_chat_with_tools(
+            messages,
+            tools_openai,
+            model=model or spec.default_model or "gpt-4o-mini",
+            api_key=api_key or "none",
+            base_url=base_url,
+        )
+        return content, tool_calls, provider, model or spec.default_model, usage
+    except Exception as e:
+        fallback = f"Agent ({provider}-error) reply: {params.message}\n\n[error: {e}]"
+        return fallback, [], provider, model, LLMUsage()
 
 
 def generate_reply(params: AgentRunParams) -> Tuple[str, str, str, LLMUsage]:

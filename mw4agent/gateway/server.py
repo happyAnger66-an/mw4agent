@@ -347,6 +347,8 @@ def create_app(
                             channel=str(params.get("channel") or "internal"),
                             deliver=bool(params.get("deliver") is True),
                             extra_system_prompt=str(params.get("extraSystemPrompt") or "") or None,
+                            thinking_level=str(params.get("thinkingLevel") or "").strip() or None,
+                            reasoning_level=str(params.get("reasoningLevel") or "").strip() or None,
                         )
                     )
                     final_payload = {"runId": run_id, "status": "ok", "summary": "completed", "result": {"meta": asdict(result.meta)}}
