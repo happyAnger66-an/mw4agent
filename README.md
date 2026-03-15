@@ -1,103 +1,94 @@
-# MW4Agent CLI
+# MW4Agent
 
-Python implementation of CLI mechanism inspired by OpenClaw's extensible command registration system.
+Python 实现的智能体网关与 CLI，设计上参考 [OpenClaw](https://github.com/openclaw/openclaw) 的网关模型、RPC 语义与可扩展命令体系，提供 Gateway、Agent 运行、多通道接入与 Web 控制台等能力。
 
-## Features
+## 功能概览
 
-- **Extensible command registration**: Similar to OpenClaw's command-registry.ts
-- **Lazy loading**: Commands are loaded on-demand for faster startup
-- **Gateway commands**: Initial implementation of gateway command group
+- **Gateway**：HTTP RPC（`agent` / `agent.wait` / `health`）与 WebSocket 事件流（`/ws`），支持幂等、run 注册与等待
+- **Agent Runner**：基于 LLM 的对话与工具调用循环，支持 reasoning/thinking 流式输出、内置 read/write 工具（workspace 限定）
+- **CLI**：可扩展命令注册与懒加载，提供 `gateway`、`agent`、`channels`、`config`、`configuration` 等命令组
+- **Dashboard**：浏览器控制台，连接 Gateway WebSocket，支持聊天、事件流展示与多语言/主题
+- **Channels**：Console、Telegram、Webhook、飞书等通道，可独立运行或与 Gateway 配合
+- **配置与安全**：加密配置文件、LLM provider/model 配置、技能（skills）管理
 
-## Installation
+## 安装
 
 ```bash
+git clone <repo-url>
+cd mw4agent
 pip install -e .
 ```
 
-## Usage
+依赖：Python ≥ 3.8，参见 `setup.py` 中的 `install_requires`（如 click、fastapi、uvicorn、cryptography、httpx 等）。
+
+## 使用
+
+安装后可通过命令行使用：
 
 ```bash
-# Show help
 mw4agent --help
-
-# Gateway commands
-mw4agent gateway --help
-mw4agent gateway run
-mw4agent gateway status
-mw4agent gateway call health
-mw4agent gateway discover
-mw4agent gateway probe
+mw4agent gateway run --bind 127.0.0.1 --port 18790
+mw4agent gateway status --url http://127.0.0.1:18790
 ```
 
-## Architecture
+### Dashboard 控制台
 
-The CLI follows OpenClaw's architecture:
+Dashboard 是内嵌在 Gateway 里的 Web 控制台，用于在浏览器里与 Agent 对话、查看连接状态与事件流。
 
-1. **Command Registry** (`cli/registry.py`): Manages command registration
-2. **Command Entries**: Define commands with descriptors and registration functions
-3. **Lazy Loading**: Only loads the primary command initially
-4. **Program Context**: Provides context (version, channel options, etc.)
+1. **启动 Gateway**（会同时提供 Dashboard 静态页与 WebSocket）：
 
-## Adding New Commands
+   ```bash
+   mw4agent gateway run --bind 127.0.0.1 --port 18790
+   ```
 
-### 1. Create command module
+2. **打开浏览器**访问：
 
-Create a new module in `cli/` directory, e.g., `cli/models/register.py`:
+   - 根路径（会跳转到 Dashboard）：`http://127.0.0.1:18790/`
+   - 或直接：`http://127.0.0.1:18790/dashboard/`
 
-```python
-import click
-from ..context import ProgramContext
+3. **界面说明**：
+   - **左侧**：聊天区域，输入消息后通过 Gateway RPC 触发 Agent，回复经 WebSocket 流式展示；可勾选「显示推理过程」查看 reasoning 块。
+   - **右侧**：两个标签——**Gateway** 显示 WebSocket 连接状态、RPC 端点、最近 runId、事件总数；**事件** 分条展示当前收到的 WebSocket 事件（lifecycle / tool / assistant）。
+   - **顶部**：主题切换（浅色 / 柔和暗色 / 深色）、中英文切换、连接状态。
 
-def register_models_cli(program: click.Group, ctx: ProgramContext) -> None:
-    @program.group("models", help="Manage models")
-    def models():
-        pass
-    
-    @models.command("list", help="List available models")
-    def models_list():
-        click.echo("Models list")
-```
+若在本地已启动 Gateway，将浏览器指向上述地址即可使用。界面示意如下（将实际截图保存为 `docs/images/dashboard-screenshot.png` 即可在文档中显示）：
 
-### 2. Register in main.py
+![Dashboard 界面](docs/images/dashboard.png)
 
-Add to `register_core_commands()`:
+**完整用法与示例**（包括 gateway、agent、channels、config、configuration 等）请参见：
 
-```python
-from .models import register_models_cli
+- **[CLI 使用手册](docs/manuals/cli.md)**
 
-models_entry = CommandEntry(
-    commands=[{
-        "name": "models",
-        "description": "Manage models",
-        "has_subcommands": True,
-    }],
-    register=register_models_cli,
-)
-get_registry().register_entry(models_entry)
-```
+## 架构特点
 
-## Project Structure
+- **CLI 可扩展**：类似 OpenClaw 的 command-registry，命令按需懒加载，便于扩展新命令组
+- **Gateway 中心化**：统一提供 RPC 与 WebSocket，Agent 事件（lifecycle / assistant / tool）经 Gateway 广播，便于多端消费
+- **Agent 与事件流**：`AgentRunner` 内部事件流与 Gateway 桥接，runId 贯穿全链路，支持 `agent.wait` 等待终态
+- **工具与权限**：内置 read/write 工具限定在 `workspace_dir` 下；工具支持 `owner_only` 标记（可扩展为按身份过滤）
+- **多后端 LLM**：支持 echo、OpenAI 兼容、OpenRouter 等，配置驱动；可选 reasoning/thinking 级别与推理块展示
+
+更多架构与设计文档见 `docs/architecture/` 与 `docs/openclaw/`。
+
+## 项目结构（简要）
 
 ```
 mw4agent/
 ├── mw4agent/
-│   ├── __init__.py
-│   ├── __main__.py
-│   └── cli/
-│       ├── __init__.py
-│       ├── main.py          # Main entry point
-│       ├── context.py       # Program context
-│       ├── registry.py      # Command registry
-│       └── gateway/
-│           ├── __init__.py
-│           └── register.py # Gateway commands
+│   ├── cli/              # CLI 入口与命令注册
+│   ├── gateway/          # Gateway HTTP/WS 服务与状态
+│   ├── agents/            # AgentRunner、tools、events、reasoning
+│   ├── llm/               # LLM 调用与多后端
+│   ├── dashboard/         # 前端静态资源（index.html、app.js 等）
+│   ├── channels/         # console、telegram、webhook、feishu
+│   └── ...
+├── docs/
+│   ├── manuals/cli.md     # CLI 使用手册（推荐入口）
+│   ├── architecture/     # 架构与设计文档
+│   └── openclaw/         # 与 OpenClaw 的对照与说明
 ├── setup.py
 └── README.md
 ```
 
-## Design Principles
+## License
 
-- **Extensibility**: Easy to add new commands via registry
-- **Lazy Loading**: Fast startup by loading commands on-demand
-- **Consistency**: Similar API to OpenClaw's CLI system
-- **Type Safety**: Uses type hints throughout
+见仓库根目录 LICENSE 文件。
