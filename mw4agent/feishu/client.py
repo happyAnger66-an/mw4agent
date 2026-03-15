@@ -17,6 +17,7 @@ Phase 1 目标：
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -47,8 +48,18 @@ class FeishuClient:
             app_id = _env("FEISHU_APP_ID")
             app_secret = _env("FEISHU_APP_SECRET")
             if not app_id or not app_secret:
+                try:
+                    from mw4agent.config import read_root_section
+                    channels = read_root_section("channels", default={})
+                    feishu_cfg = channels.get("feishu") or {}
+                    app_id = app_id or (feishu_cfg.get("app_id") or "").strip()
+                    app_secret = app_secret or (feishu_cfg.get("app_secret") or "").strip()
+                except Exception:
+                    pass
+            if not app_id or not app_secret:
                 raise RuntimeError(
-                    "FeishuClient requires FEISHU_APP_ID and FEISHU_APP_SECRET environment variables"
+                    "FeishuClient requires FEISHU_APP_ID and FEISHU_APP_SECRET "
+                    "(environment variables or mw4agent configuration set-channels --channel feishu)"
                 )
             api_base = _env("FEISHU_API_BASE", "https://open.feishu.cn/open-apis")
             cfg = FeishuConfig(app_id=app_id, app_secret=app_secret, api_base=api_base)
@@ -87,6 +98,14 @@ class FeishuClient:
         self._tenant_token_expire_at = now + expire
         return token
 
+    def _post_content(self, text: str) -> str:
+        """Build Feishu post-format content (align with feishu-openclaw-plugin send.js)."""
+        return json.dumps({
+            "zh_cn": {
+                "content": [[{"tag": "md", "text": text}]],
+            },
+        })
+
     async def send_text(
         self,
         *,
@@ -95,22 +114,20 @@ class FeishuClient:
         reply_to_message_id: Optional[str] = None,
         reply_in_thread: bool = False,
     ) -> Dict[str, Any]:
-        """Send a plain text message or reply.
-
-        Phase 1 中我们用简单的 `text` 消息，后续可以扩展为 `post` 或 card。
-        """
+        """Send a message or reply using Feishu post format (same as OpenClaw plugin)."""
         token = await self._get_tenant_access_token()
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json; charset=utf-8",
         }
+        content_payload = self._post_content(text)
 
         if reply_to_message_id:
-            # Reply to an existing message.
+            # Reply to an existing message (same API shape as feishu-openclaw-plugin).
             url = f"{self._base}/im/v1/messages/{reply_to_message_id}/reply"
             payload = {
-                "msg_type": "text",
-                "content": {"text": text},
+                "msg_type": "post",
+                "content": content_payload,
                 "reply_in_thread": reply_in_thread,
             }
             async with httpx.AsyncClient(timeout=10, headers=headers) as client:
@@ -123,8 +140,8 @@ class FeishuClient:
         params = {"receive_id_type": "chat_id"}
         payload = {
             "receive_id": chat_id,
-            "msg_type": "text",
-            "content": {"text": text},
+            "msg_type": "post",
+            "content": content_payload,
         }
         async with httpx.AsyncClient(timeout=10, headers=headers, params=params) as client:
             resp = await client.post(url, json=payload)

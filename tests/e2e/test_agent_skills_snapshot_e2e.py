@@ -47,6 +47,7 @@ async def test_agent_skills_snapshot_is_used_in_llm_prompt(tmp_path: Path, monke
         session_key="e2e:skills",
         session_id="e2e-skills",
         agent_id="e2e",
+        provider="echo",  # 固定使用 echo 后端，避免环境中的真实 LLM 导致断言失败
     )
 
     result = await runner.run(params)

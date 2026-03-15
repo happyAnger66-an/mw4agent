@@ -63,6 +63,7 @@ function appendLogEntry(payload) {
   } else summary = type || JSON.stringify(data).slice(0, 80);
   const entry = document.createElement("div");
   entry.className = "log-entry";
+  entry.setAttribute("data-stream", stream);
   entry.innerHTML = `<span class="log-entry-time">${formatLogTime(ts)}</span><span class="log-entry-stream">${escapeHtml(stream)}</span>${runId ? ` <span class="log-entry-run">${escapeHtml(runId.slice(0, 8))}</span>` : ""} ${escapeHtml(summary)}`;
   logListEl.appendChild(entry);
   logEntries.push(entry);

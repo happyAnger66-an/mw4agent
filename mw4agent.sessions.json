@@ -15,8 +15,18 @@
       "session_key": "dashboard",
       "agent_id": "dashboard",
       "created_at": 1773415151845,
-      "updated_at": 1773495791445,
-      "message_count": 29,
+      "updated_at": 1773558893915,
+      "message_count": 31,
+      "total_tokens": 0,
+      "metadata": {}
+    },
+    {
+      "session_id": "oc_039419815ca8fa8923d371b60250cc38",
+      "session_key": "feishu:oc_039419815ca8fa8923d371b60250cc38",
+      "agent_id": "main",
+      "created_at": 1773572224556,
+      "updated_at": 1773573727867,
+      "message_count": 5,
       "total_tokens": 0,
       "metadata": {}
     }

@@ -66,11 +66,18 @@ class ChannelDispatcher:
 
         if result_text:
             logger.info("channel=%s reply length=%s", ctx.channel, len(result_text))
+            # 将入站 extra（chat_id/message_id）与 session_id 传给 deliver，供 Feishu 等回发到正确会话
+            extra = {
+                "inbound": {
+                    "extra": ctx.extra if isinstance(ctx.extra, dict) else {},
+                    "session_id": ctx.session_id,
+                }
+            }
             await plugin.deliver(
                 OutboundPayload(
                     text=result_text,
                     is_error=False,
-                    extra={},
+                    extra=extra,
                 )
             )
         else:

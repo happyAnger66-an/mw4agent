@@ -13,6 +13,7 @@ import json
 import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -24,9 +25,12 @@ from fastapi.staticfiles import StaticFiles
 from ..agents.runner.runner import AgentRunner
 from ..agents.session.manager import SessionManager
 from ..agents.types import AgentRunParams
+from ..log import get_logger
 from ..plugin import load_plugins
 from .state import DedupeEntry, GatewayState, RunSnapshot
 from .types import AgentEvent
+
+logger = get_logger(__name__)
 
 
 def _now_ms() -> int:
@@ -55,7 +59,6 @@ def create_app(
     # Load plugins (register tools from MW4AGENT_PLUGIN_DIR) before creating runner
     load_plugins()
 
-    app = FastAPI(title="MW4Agent Gateway", version="0.1")
     if node_token is None:
         t = os.environ.get("GATEWAY_NODE_TOKEN")
         node_token = t.strip() if isinstance(t, str) and t.strip() else None
@@ -64,6 +67,51 @@ def create_app(
     state = GatewayState(node_token=node_token)
     session_manager = SessionManager(session_file)
     runner = AgentRunner(session_manager)
+
+    # --- Feishu channel: if configured, webhook 挂载到 app 或 websocket 随进程启动（由配置 connection_mode 决定）---
+    feishu_webhook_router = None
+    feishu_ws_start: Optional[tuple] = None  # (plugin, dispatcher) for lifespan
+    try:
+        from ..config import read_root_section
+        channels = read_root_section("channels", default={})
+        feishu_cfg = channels.get("feishu") or {}
+        app_id = (feishu_cfg.get("app_id") or "").strip() or os.getenv("FEISHU_APP_ID", "").strip()
+        app_secret = (feishu_cfg.get("app_secret") or "").strip() or os.getenv("FEISHU_APP_SECRET", "").strip()
+        connection_mode = (feishu_cfg.get("connection_mode") or "webhook").strip().lower()
+        if connection_mode not in ("webhook", "websocket"):
+            connection_mode = "webhook"
+        if app_id and app_secret:
+            from ..channels.dispatcher import ChannelDispatcher, ChannelRuntime
+            from ..channels.plugins.feishu import FeishuChannel
+            from ..channels.registry import ChannelRegistry
+            registry = ChannelRegistry()
+            feishu_plugin = FeishuChannel(connection_mode=connection_mode, path="/feishu/webhook")
+            registry.register_plugin(feishu_plugin)
+            runtime = ChannelRuntime(
+                session_manager=session_manager,
+                agent_runner=runner,
+                gateway_base_url=None,
+            )
+            dispatcher = ChannelDispatcher(runtime=runtime, registry=registry)
+            if connection_mode == "webhook":
+                feishu_webhook_router = feishu_plugin.get_webhook_router(on_inbound=dispatcher.dispatch_inbound)
+                logger.info("Feishu channel enabled (webhook, will mount at /feishu/webhook)")
+            else:
+                feishu_ws_start = (feishu_plugin, dispatcher)
+                logger.info("Feishu channel enabled (websocket, will start in lifespan)")
+    except Exception as e:
+        logger.debug("Feishu channel not started: %s", e)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if feishu_ws_start:
+            plugin, disp = feishu_ws_start
+            asyncio.create_task(plugin._run_ws_monitor(on_inbound=disp.dispatch_inbound))
+        yield
+
+    app = FastAPI(title="MW4Agent Gateway", version="0.1", lifespan=lifespan)
+    if feishu_webhook_router is not None:
+        app.include_router(feishu_webhook_router)
 
     # --- Bridge AgentRunner events -> Gateway WS broadcasts + run snapshots ---
     async def handle_agent_stream_event(evt) -> None:

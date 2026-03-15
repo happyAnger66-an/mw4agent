@@ -35,6 +35,9 @@
         --meta-item-bg: #f8fafc;
         --meta-item-border: rgba(148, 163, 184, 0.35);
         --meta-badge-bg: #f1f5f9;
+        --event-lifecycle: #0284c7;
+        --event-assistant: #059669;
+        --event-tool: #d97706;
         --title-mark-inner: radial-gradient(circle at 30% 0, rgba(248, 250, 252, 0.9), transparent 52%),
           radial-gradient(circle at 75% 75%, rgba(241, 245, 249, 0.95), #e2e8f0 72%);
       }
@@ -66,6 +69,9 @@
         --meta-item-bg: rgba(30, 41, 59, 0.85);
         --meta-item-border: rgba(51, 65, 85, 0.9);
         --meta-badge-bg: rgba(30, 41, 59, 0.9);
+        --event-lifecycle: #38bdf8;
+        --event-assistant: #34d399;
+        --event-tool: #fbbf24;
         --title-mark-inner: radial-gradient(circle at 30% 0, rgba(248, 250, 252, 0.5), transparent 52%),
           radial-gradient(circle at 75% 75%, rgba(30, 41, 59, 0.95), #1e293b 72%);
       }
@@ -97,6 +103,9 @@
         --meta-item-bg: rgba(15, 23, 42, 0.85);
         --meta-item-border: rgba(51, 65, 85, 0.85);
         --meta-badge-bg: rgba(15, 23, 42, 0.9);
+        --event-lifecycle: #38bdf8;
+        --event-assistant: #34d399;
+        --event-tool: #fbbf24;
         --title-mark-inner: radial-gradient(circle at 30% 0, rgba(248, 250, 252, 0.7), transparent 52%),
           radial-gradient(circle at 75% 75%, rgba(15, 23, 42, 0.9), #020617 72%);
       }
@@ -611,6 +620,25 @@
       .log-entry-stream {
         font-weight: 600;
         color: var(--accent);
+      }
+
+      .log-entry[data-stream="lifecycle"] {
+        border-left-color: var(--event-lifecycle);
+      }
+      .log-entry[data-stream="lifecycle"] .log-entry-stream {
+        color: var(--event-lifecycle);
+      }
+      .log-entry[data-stream="assistant"] {
+        border-left-color: var(--event-assistant);
+      }
+      .log-entry[data-stream="assistant"] .log-entry-stream {
+        color: var(--event-assistant);
+      }
+      .log-entry[data-stream="tool"] {
+        border-left-color: var(--event-tool);
+      }
+      .log-entry[data-stream="tool"] .log-entry-stream {
+        color: var(--event-tool);
       }
 
       .log-entry-run {

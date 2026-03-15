@@ -43,6 +43,7 @@ async def test_skills_snapshot_attached_and_used(tmp_path: Path, monkeypatch) ->
         session_key="e2e:skills",
         session_id="e2e-skills",
         agent_id="test-agent",
+        provider="echo",  # 固定使用 echo 后端，避免环境中的真实 LLM 导致断言失败
     )
 
     result = await runner.run(params)

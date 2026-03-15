@@ -150,6 +150,7 @@ def gateway_with_mock_llm(tmp_path: Path, mock_llm_server: int):
             "llm": {
                 "provider": "openai",
                 "model": "mock-gpt",
+                "base_url": f"http://127.0.0.1:{mock_port}",
             },
         }),
         encoding="utf-8",

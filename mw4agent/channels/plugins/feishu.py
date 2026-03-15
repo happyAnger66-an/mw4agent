@@ -12,11 +12,12 @@ from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from ..dock import ChannelDock
 from ..feishu_outbound import send_text as send_text_outbound
+from ...log import get_logger
 from ..types import (
     ChannelCapabilities,
     ChannelMeta,
@@ -24,6 +25,8 @@ from ..types import (
     OutboundPayload,
 )
 from .base import ChannelPlugin, InboundHandler
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -75,12 +78,11 @@ class FeishuChannel(ChannelPlugin):
         else:  # pragma: no cover - 防御性分支
             raise RuntimeError(f"Unsupported Feishu connection_mode: {self.connection_mode}")
 
-    async def _run_webhook_monitor(self, *, on_inbound: InboundHandler) -> None:
-        """启动 Feishu Webhook（事件订阅）监听服务。"""
+    def get_webhook_router(self, on_inbound: InboundHandler) -> APIRouter:
+        """返回可用于挂载到现有 FastAPI 应用的 Webhook 路由器（如随 Gateway 一起启动）。"""
+        router = APIRouter(prefix=self.path.rstrip("/") or "/", tags=["feishu"])
 
-        app = FastAPI(title="MW4Agent Feishu Channel")
-
-        @app.post(self.path)
+        @router.post("")
         async def handle_feishu(req: Request):
             try:
                 body: Any = await req.json()
@@ -122,10 +124,20 @@ class FeishuChannel(ChannelPlugin):
             if not text:
                 return JSONResponse(status_code=200, content={"code": 0, "msg": "empty_text"})
 
-            chat_id = msg.get("chat_id") or event.get("chat_id")
-            chat_type = msg.get("chat_type") or event.get("chat_type") or "p2p"
-            message_id = msg.get("message_id") or msg.get("msg_id")
-            thread_id = msg.get("thread_id") or None
+            # 与 feishu-openclaw-plugin 一致：event.message.chat_id / message_id；兼容 snake_case / camelCase
+            chat_id = (
+                msg.get("chat_id") or msg.get("chatId")
+                or event.get("chat_id") or event.get("chatId")
+            )
+            chat_type = (
+                msg.get("chat_type") or msg.get("chatType")
+                or event.get("chat_type") or event.get("chatType") or "p2p"
+            )
+            message_id = (
+                msg.get("message_id") or msg.get("messageId")
+                or msg.get("msg_id") or msg.get("msgId")
+            )
+            thread_id = msg.get("thread_id") or msg.get("threadId") or None
 
             sender = event.get("sender") or {}
             sender_id_obj = sender.get("sender_id") or {}
@@ -183,9 +195,14 @@ class FeishuChannel(ChannelPlugin):
 
             return JSONResponse(content={"code": 0, "msg": "ok"})
 
+        return router
+
+    async def _run_webhook_monitor(self, *, on_inbound: InboundHandler) -> None:
+        """启动 Feishu Webhook（事件订阅）独立监听服务。"""
+        app = FastAPI(title="MW4Agent Feishu Channel")
+        app.include_router(self.get_webhook_router(on_inbound))
         config = uvicorn.Config(app, host=self.host, port=self.port, log_level="info")
         server = uvicorn.Server(config)
-
         loop = asyncio.get_running_loop()
 
         def _run_server() -> None:
@@ -212,12 +229,21 @@ class FeishuChannel(ChannelPlugin):
 
         app_id = os.getenv("FEISHU_APP_ID")
         app_secret = os.getenv("FEISHU_APP_SECRET")
+        if not app_id or not app_secret:
+            try:
+                from mw4agent.config import read_root_section
+                channels = read_root_section("channels", default={})
+                feishu_cfg = channels.get("feishu") or {}
+                app_id = app_id or (feishu_cfg.get("app_id") or "").strip()
+                app_secret = app_secret or (feishu_cfg.get("app_secret") or "").strip()
+            except Exception:
+                pass
         encrypt_key = os.getenv("FEISHU_ENCRYPT_KEY", "") or ""
         verification_token = os.getenv("FEISHU_VERIFICATION_TOKEN", "") or ""
 
         if not app_id or not app_secret:
             raise RuntimeError(
-                "Feishu WebSocket 模式需要环境变量 FEISHU_APP_ID 和 FEISHU_APP_SECRET。"
+                "Feishu WebSocket 模式需要配置 FEISHU_APP_ID 和 FEISHU_APP_SECRET（环境变量或 mw4agent configuration set-channels --channel feishu --app-id ... --app-secret ...）。"
             )
 
         loop = asyncio.get_running_loop()
@@ -316,31 +342,38 @@ class FeishuChannel(ChannelPlugin):
             except Exception as e:  # pragma: no cover - 日志路径
                 print(f"[Feishu WS] error handling message event: {e}")
 
-        # 构建事件分发器
+        # 构建事件分发器（_handle_im_message 内用 run_coroutine_threadsafe 回主 loop，无需改）
         event_handler = (
             lark.EventDispatcherHandler.builder(encrypt_key, verification_token)
             .register_p2_im_message_receive_v1(_handle_im_message)
             .build()
         )
 
-        # 创建并启动 WebSocket 客户端（阻塞），放到线程池中运行
-        ws_client = lark.ws.Client(
-            app_id,
-            app_secret,
-            event_handler=event_handler,
-            log_level=lark.LogLevel.DEBUG,
-            app_type=lark.AppType.SELF_BUILD,
-        )
-
+        # lark-oapi 在模块加载时固定了全局 loop，且 Client.start() 里用 loop.run_until_complete()。
+        # 若在 run_in_executor 的线程里直接 start()，用的仍是主线程已运行的 loop → RuntimeError: this event loop is already running.
+        # 做法：在 WS 线程内新建并设置该线程的 event loop，并让 lark_oapi.ws.client 使用该 loop，且在该线程内创建 Client（Lock 等绑定到该 loop），再 start()。
         def _run_ws() -> None:
-            ws_client.start()
+            ws_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(ws_loop)
+            try:
+                import lark_oapi.ws.client as ws_client_mod
+                ws_client_mod.loop = ws_loop  # 使 Client.start() 使用本线程的 loop
+                ws_client = lark.ws.Client(
+                    app_id,
+                    app_secret,
+                    event_handler=event_handler,
+                    log_level=lark.LogLevel.DEBUG,
+                )
+                ws_client.start()
+            finally:
+                ws_loop.close()
 
         await loop.run_in_executor(None, _run_ws)
 
     async def deliver(self, payload: OutboundPayload) -> None:
         """Send outbound payload to Feishu.
 
-        Phase 1: 仅支持文本消息，且只处理 chat_id 目标。
+        Phase 1: 仅支持文本消息。chat_id 优先从 inbound.extra 取，缺省时用 inbound.session_id（feishu 下即会话 chat_id）回退。
         """
         inbound = None
         if isinstance(payload.extra, dict):
@@ -349,6 +382,7 @@ class FeishuChannel(ChannelPlugin):
         chat_id: str | None = None
         reply_to_id: str | None = None
         thread_id: str | None = None
+        session_id: str | None = None
 
         if isinstance(inbound, dict):
             extra = inbound.get("extra")
@@ -356,20 +390,30 @@ class FeishuChannel(ChannelPlugin):
                 chat_id = extra.get("chat_id") or extra.get("chatId")
                 reply_to_id = extra.get("message_id") or extra.get("messageId")
                 thread_id = extra.get("thread_id") or extra.get("threadId")
+            session_id = inbound.get("session_id")
+
+        # 与 feishu-openclaw-plugin 一致：session 即 chat_id 时可用作回退
+        if not chat_id and session_id and str(session_id).strip() and str(session_id) != "unknown":
+            chat_id = str(session_id).strip()
 
         if not chat_id:
-            # 没有 chat_id 时暂时退化为打印到 stdout，避免静默失败
             prefix = "ERR" if payload.is_error else "AI"
+            logger.warning("[feishu] no chat_id (extra.session_id=%s), fallback to stdout", session_id)
             print(f"[feishu:{prefix}] {payload.text}")
             return
 
-        await send_text_outbound(
-            cfg=None,
-            to=str(chat_id),
-            text=payload.text,
-            account_id=None,
-            reply_to_id=reply_to_id,
-            thread_id=thread_id,
-            mentions=None,
-        )
+        logger.info("[feishu] deliver chat_id=%s reply_to=%s thread=%s", chat_id, reply_to_id, thread_id)
+        try:
+            await send_text_outbound(
+                cfg=None,
+                to=str(chat_id),
+                text=payload.text,
+                account_id=None,
+                reply_to_id=reply_to_id,
+                thread_id=thread_id,
+                mentions=None,
+            )
+        except Exception as e:
+            logger.exception("[feishu] deliver failed: %s", e)
+            raise
 
