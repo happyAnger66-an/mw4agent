@@ -5,12 +5,12 @@ from .registry import ToolRegistry, get_tool_registry
 from .gateway_tool import GatewayLsTool
 from .read_tool import ReadTool
 from .write_tool import WriteTool
-from .memory_tool import MemorySearchTool, MemoryGetTool
+from .memory_tool import MemorySearchTool, MemoryGetTool, MemoryWriteTool
 
 
 def _register_builtin_tools() -> None:
     reg = get_tool_registry()
-    for tool in (ReadTool(), WriteTool(), MemorySearchTool(), MemoryGetTool()):
+    for tool in (ReadTool(), WriteTool(), MemorySearchTool(), MemoryGetTool(), MemoryWriteTool()):
         if reg.get_tool(tool.name) is None:
             reg.register(tool)
 
@@ -27,4 +27,5 @@ __all__ = [
     "WriteTool",
     "MemorySearchTool",
     "MemoryGetTool",
+    "MemoryWriteTool",
 ]

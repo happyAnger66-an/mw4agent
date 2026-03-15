@@ -10,29 +10,35 @@ import click
 
 from ..context import ProgramContext
 from ... import memory as memory_mod
+from ...config.paths import get_default_workspace_dir
 
 
 def _workspace_dir(ctx: click.Context) -> str:
     # Subcommands get parent context from group where --workspace was set
     obj = (ctx.obj or (ctx.parent.obj if ctx.parent else None) or {})
-    return obj.get("workspace_dir") or os.getcwd()
+    return obj.get("workspace_dir") or get_default_workspace_dir()
 
 
 def register_memory_cli(program: click.Group, ctx: ProgramContext) -> None:
     """Register memory command group (OpenClaw-style memory status/search/get)."""
 
-    @program.group("memory", help="Search, inspect memory files (MEMORY.md, memory/*.md)")
+    @program.group(
+        "memory",
+        help="Search, inspect memory/bootstrap files (~/.mw4agent/workspace: USER.md, MEMORY.md, etc.)",
+    )
     @click.option(
         "--workspace",
         "workspace_dir",
-        type=click.Path(exists=True, file_okay=False, dir_okay=True),
+        type=click.Path(file_okay=False, dir_okay=True),
         default=None,
-        help="Workspace directory (default: current directory)",
+        help="Workspace directory (default: ~/.mw4agent/workspace)",
     )
     @click.pass_context
     def memory_group(click_ctx: click.Context, workspace_dir: Optional[str]) -> None:
         click_ctx.ensure_object(dict)
-        click_ctx.obj["workspace_dir"] = os.path.abspath(workspace_dir or os.getcwd())
+        click_ctx.obj["workspace_dir"] = os.path.abspath(
+            workspace_dir or get_default_workspace_dir()
+        )
 
     @memory_group.command("status", help="Show memory files and index status")
     @click.option("--json", "json_output", is_flag=True, help="Output JSON")

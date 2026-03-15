@@ -25,7 +25,9 @@ from fastapi.staticfiles import StaticFiles
 from ..agents.runner.runner import AgentRunner
 from ..agents.session.manager import SessionManager
 from ..agents.types import AgentRunParams
+from ..config.paths import ensure_workspace_dir, get_default_workspace_dir
 from ..log import get_logger
+from ..memory.bootstrap import load_bootstrap_system_prompt
 from ..plugin import load_plugins
 from .state import DedupeEntry, GatewayState, RunSnapshot
 from .types import AgentEvent
@@ -389,6 +391,12 @@ def create_app(
 
             async def _run() -> None:
                 try:
+                    workspace_dir = ensure_workspace_dir()
+                    bootstrap = load_bootstrap_system_prompt(workspace_dir)
+                    extra = str(params.get("extraSystemPrompt") or "").strip()
+                    extra_system_prompt = (
+                        f"{bootstrap}\n\n{extra}".strip() if bootstrap else (extra or None)
+                    )
                     result = await runner.run(
                         AgentRunParams(
                             message=message,
@@ -398,9 +406,10 @@ def create_app(
                             agent_id=agent_id,
                             channel=str(params.get("channel") or "internal"),
                             deliver=bool(params.get("deliver") is True),
-                            extra_system_prompt=str(params.get("extraSystemPrompt") or "") or None,
+                            extra_system_prompt=extra_system_prompt,
                             thinking_level=str(params.get("thinkingLevel") or "").strip() or None,
                             reasoning_level=str(params.get("reasoningLevel") or "").strip() or None,
+                            workspace_dir=workspace_dir,
                         )
                     )
                     final_payload = {"runId": run_id, "status": "ok", "summary": "completed", "result": {"meta": asdict(result.meta)}}

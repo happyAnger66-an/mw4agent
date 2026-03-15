@@ -24,7 +24,7 @@ MW4Agent 已实现与 OpenClaw 对齐的 **memory_tool**（Agent 工具）和 **
 
 | 组件 | 说明 |
 |------|------|
-| **mw4agent.memory** | 模块：`list_memory_files(workspace_dir)`、`search(query, workspace_dir, max_results=10, min_score=0)`、`read_file(workspace_dir, rel_path, from_line=None, lines=None)`。来源仅限工作区 `MEMORY.md`、`memory.md`、`memory/*.md`。检索为关键词匹配（无 embedding）。 |
+| **mw4agent.memory** | 模块：`list_memory_files(workspace_dir)`、`search(...)`、`read_file(...)`。来源为工作区根下：`AGENTS.md`、`SOUL.md`、`TOOLS.md`、`IDENTITY.md`、`USER.md`、`HEARTBEAT.md`、`BOOTSTRAP.md`、`MEMORY.md`、`memory.md` 以及 `memory/*.md`。检索为关键词匹配（无 embedding）。 |
 | **memory_search** | Agent 工具：参数 `query`（必填）、`maxResults`、`minScore`；返回 `results`（path、startLine、endLine、snippet、score）。无可用时返回 `disabled: true`。 |
 | **memory_get** | Agent 工具：参数 `path`（必填）、`from`、`lines`；返回 `path`、`text`、`missing`。仅允许读取 `list_memory_files` 中的路径。 |
 | **memory status** | CLI：列出工作区、provider（file）、记忆文件列表。 |
@@ -43,12 +43,26 @@ MW4Agent 已实现与 OpenClaw 对齐的 **memory_tool**（Agent 工具）和 **
 
 因此：**memory 检索结果会作为 tool 消息进入对话历史，并在此后的 LLM 调用中被使用**。无需额外“把 memory 注入 prompt”的步骤，只要模型选择调用 memory_search/memory_get，结果就会自动进入上下文。
 
-### 2.3 工作区与上下文
+### 2.3 工作区与 Bootstrap（OpenClaw 对齐）
 
-- **Agent**：通过 Runner 的 tool context 传入 `workspace_dir`（来自 `AgentRunParams.workspace_dir` 或当前工作目录）。
-- **CLI**：通过 `--workspace` 指定目录，默认为当前目录。
+- **默认工作区**：`~/.mw4agent/workspace`（可通过环境变量 `MW4AGENT_WORKSPACE_DIR` 覆盖）。首次使用时自动创建。
+- **Agent**：Runner 的 tool context 使用 `params.workspace_dir or get_default_workspace_dir()`，Gateway 发起 run 时传入该默认工作区。
+- **CLI**：`memory status/search/get` 的 `--workspace` 默认为 `~/.mw4agent/workspace`。
+- **Bootstrap 注入**：每次 Agent run 前，从工作区按**固定顺序**读取以下文件（若存在），拼接后作为 **system prompt** 注入 LLM。顺序为 **IDENTITY.md → USER.md → MEMORY.md → memory.md** 优先，再读 AGENTS.md、SOUL.md、TOOLS.md、HEARTBEAT.md、BOOTSTRAP.md，这样在总字符上限内会优先包含“身份/用户/记忆”，避免“我是谁”等依赖 MEMORY.md 的问题。单文件与总字符数有上限（与 OpenClaw token-use 对齐）。
 
-### 2.4 后续扩展
+### 2.4 与 OpenClaw 文件格式兼容性
+
+**可以。** MW4Agent 对 MEMORY.md、USER.md、IDENTITY.md 等 .md 文件的处理与 OpenClaw 兼容，可直接复用 OpenClaw 的 workspace 文件。
+
+| 维度 | 说明 |
+|------|------|
+| **文件名与目录** | 与 OpenClaw 的 `VALID_BOOTSTRAP_NAMES` 对齐：根下支持 `AGENTS.md`、`SOUL.md`、`TOOLS.md`、`IDENTITY.md`、`USER.md`、`HEARTBEAT.md`、`BOOTSTRAP.md`、`MEMORY.md`、`memory.md`，以及 `memory/*.md`。目录结构为「工作区根目录 + 上述文件 + memory/ 子目录下 .md」。 |
+| **文件内容格式** | **无特殊格式要求**：所有 .md 均按**纯文本**读写，不做 YAML frontmatter 解析或结构化解析。OpenClaw 的 MEMORY.md / USER.md 等若为纯 Markdown 或「YAML frontmatter + Markdown」，可直接使用；frontmatter 会一并注入/检索，不会报错。 |
+| **工作区路径** | OpenClaw 默认工作区为 `~/.openclaw/workspace`，MW4Agent 为 `~/.mw4agent/workspace`。若要直接使用 OpenClaw 的同一批文件，可将 OpenClaw workspace 目录内容**复制或链接**到 `~/.mw4agent/workspace`，或将 `MW4AGENT_WORKSPACE_DIR` 指向 OpenClaw 的 workspace 目录。 |
+
+**小结**：同一套 MEMORY.md、USER.md、IDENTITY.md 等可直接在 OpenClaw 与 MW4Agent 间共用，仅需保证路径指向同一目录或拷贝到 MW4Agent 默认工作区即可。
+
+### 2.5 后续扩展
 
 可在此之上增加：
 

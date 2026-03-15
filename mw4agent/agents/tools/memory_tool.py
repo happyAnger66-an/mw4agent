@@ -9,7 +9,10 @@ import json
 from typing import Any, Dict, Optional
 
 from ... import memory
+from ...log import get_logger
 from .base import AgentTool, ToolResult
+
+logger = get_logger(__name__)
 
 
 def _read_string_param(params: Dict[str, Any], key: str, required: bool = False) -> Optional[str]:
@@ -101,6 +104,13 @@ class MemorySearchTool(AgentTool):
         max_results = int(max_results) if max_results is not None else 10
         min_score = float(min_score) if min_score is not None else 0.0
         try:
+            files = memory.list_memory_files(workspace_dir)
+            logger.info(
+                "memory_search workspace_dir=%s files=%s query=%r",
+                workspace_dir,
+                files,
+                query[:80] if query else "",
+            )
             raw = memory.search(
                 query,
                 workspace_dir,
@@ -200,3 +210,73 @@ class MemoryGetTool(AgentTool):
                 "disabled": True,
                 "error": str(e),
             })
+
+
+class MemoryWriteTool(AgentTool):
+    """Write or append to MEMORY.md or memory/*.md so content can be recalled later via memory_search."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="memory_write",
+            description=(
+                "Persist information to long-term memory so it can be recalled later. "
+                "Write or append to MEMORY.md (main memory) or memory/<topic>.md. "
+                "Use after summarizing a decision, preference, or fact the user wants remembered."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Memory file path: MEMORY.md for main memory, or memory/notes.md, memory/todos.md, etc.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to write (Markdown). Will overwrite the file unless append=true.",
+                    },
+                    "append": {
+                        "type": "boolean",
+                        "description": "If true, append to existing file instead of overwriting. Default false.",
+                    },
+                },
+                "required": ["path", "content"],
+            },
+            owner_only=False,
+        )
+
+    async def execute(
+        self,
+        tool_call_id: str,
+        params: Dict[str, Any],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> ToolResult:
+        path = _read_string_param(params, "path", required=True)
+        content = params.get("content")
+        if content is None:
+            return ToolResult(success=False, result={}, error="memory_write: content is required")
+        if not isinstance(content, str):
+            content = str(content)
+        append = bool(params.get("append") is True)
+        workspace_dir = (context or {}).get("workspace_dir") or ""
+        if not workspace_dir:
+            return ToolResult(
+                success=False,
+                result={},
+                error="memory_write: workspace_dir not set",
+            )
+        try:
+            ok, err = memory.write_memory_file(
+                workspace_dir,
+                path,
+                content,
+                append=append,
+            )
+            if not ok:
+                return ToolResult(success=False, result={"path": path}, error=err)
+            return ToolResult(
+                success=True,
+                result={"path": path, "append": append, "wrote": len(content)},
+                metadata={"path": path},
+            )
+        except Exception as e:
+            return ToolResult(success=False, result={"path": path}, error=str(e))

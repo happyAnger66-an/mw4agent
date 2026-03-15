@@ -19,7 +19,10 @@ async def test_feishu_ws_e2e_monkeypatched_lark_oapi(monkeypatch):
         events.append(ctx)
 
     # ---- 构造 fake lark_oapi 模块 ----
-    fake_lark = types.SimpleNamespace()
+    # 插件内会执行 import lark_oapi.ws.client，因此 lark_oapi 必须是“包”（有 __path__），
+    # 且需预注册 lark_oapi.ws 与 lark_oapi.ws.client，否则子线程里导入会报 "not a package"。
+    fake_lark = types.ModuleType("lark_oapi")
+    fake_lark.__path__ = []  # 使其被当作 package
 
     class FakeEvent:
         """模拟 P2ImMessageReceiveV1 数据结构."""
@@ -62,7 +65,7 @@ async def test_feishu_ws_e2e_monkeypatched_lark_oapi(monkeypatch):
             return FakeHandlerBuilder()
 
     class FakeWSClient:
-        def __init__(self, app_id, app_secret, event_handler, log_level, app_type):
+        def __init__(self, app_id, app_secret, event_handler, log_level, app_type=None):
             self._handler = event_handler
 
         def start(self) -> None:
@@ -71,9 +74,16 @@ async def test_feishu_ws_e2e_monkeypatched_lark_oapi(monkeypatch):
 
     fake_lark.EventDispatcherHandler = FakeEventDispatcherHandler
     fake_lark.JSON = FakeJSON
-    fake_lark.ws = types.SimpleNamespace(Client=FakeWSClient)
     fake_lark.LogLevel = types.SimpleNamespace(DEBUG="DEBUG")
     fake_lark.AppType = types.SimpleNamespace(SELF_BUILD="SELF_BUILD")
+
+    # 子包 lark_oapi.ws 与 lark_oapi.ws.client（_run_ws 线程内会 import lark_oapi.ws.client）
+    fake_ws = types.ModuleType("lark_oapi.ws")
+    fake_ws.Client = FakeWSClient
+    fake_lark.ws = fake_ws
+
+    fake_ws_client = types.ModuleType("lark_oapi.ws.client")
+    fake_ws_client.loop = None  # 插件会设置 ws_client_mod.loop = ws_loop
 
     # ---- 注入 fake 模块与环境变量 ----
     monkeypatch.setenv("FEISHU_APP_ID", "test_app_id")
@@ -81,6 +91,8 @@ async def test_feishu_ws_e2e_monkeypatched_lark_oapi(monkeypatch):
     monkeypatch.setenv("FEISHU_ENCRYPT_KEY", "")
     monkeypatch.setenv("FEISHU_VERIFICATION_TOKEN", "")
     monkeypatch.setitem(sys.modules, "lark_oapi", fake_lark)
+    monkeypatch.setitem(sys.modules, "lark_oapi.ws", fake_ws)
+    monkeypatch.setitem(sys.modules, "lark_oapi.ws.client", fake_ws_client)
 
     ch = FeishuChannel(connection_mode="websocket")
 

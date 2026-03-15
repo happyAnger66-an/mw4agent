@@ -26,6 +26,7 @@ from ..tools.registry import get_tool_registry
 from ..tools.base import ToolResult
 from ..queue.manager import CommandQueue
 from ..events.stream import EventStream
+from ...config.paths import get_default_workspace_dir
 from ...llm import generate_reply, generate_reply_with_tools, LLMUsage
 from ..reasoning import split_reasoning_and_text
 from ..skills.snapshot import build_skill_snapshot
@@ -247,7 +248,7 @@ class AgentRunner:
                 "run_id": run_id,
                 "session_key": params.session_key,
                 "agent_id": params.agent_id,
-                "workspace_dir": params.workspace_dir or os.getcwd(),
+                "workspace_dir": params.workspace_dir or get_default_workspace_dir(),
             }
             tool_result = await self.execute_tool(
                 tool_call_id=tool_call_id,
@@ -287,7 +288,7 @@ class AgentRunner:
                 "run_id": run_id,
                 "session_key": params.session_key,
                 "agent_id": params.agent_id,
-                "workspace_dir": params.workspace_dir or os.getcwd(),
+                "workspace_dir": params.workspace_dir or get_default_workspace_dir(),
             }
             use_tool_loop = bool(tool_definitions)
             logger.info(f"agent_turn use_tool_loop: {use_tool_loop}, tool_definitions: {tool_definitions}")
@@ -391,6 +392,11 @@ class AgentRunner:
             if not tool_calls:
                 reply_text = content or ""
                 break
+            logger.info(
+                "executing %d tool call(s): %s",
+                len(tool_calls),
+                [(tc.get("name"), tc.get("arguments")) for tc in tool_calls],
+            )
             # Emit tool start/end for each call and collect results.
             assistant_msg = {
                 "role": "assistant",
@@ -419,6 +425,12 @@ class AgentRunner:
                     )
                 except Exception as e:
                     result = ToolResult(success=False, result={}, error=str(e))
+                logger.info(
+                    "tool %s result: success=%s %s",
+                    name,
+                    result.success,
+                    (str(result.result)[:120] if result.success else result.error or "")[:120],
+                )
                 if result.success:
                     result_str = json.dumps(result.result, ensure_ascii=False) if isinstance(result.result, dict) else str(result.result)
                 else:

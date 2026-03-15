@@ -189,7 +189,8 @@ def _call_openai_chat_with_tools(
     content = msg.get("content")
     if content is not None and not isinstance(content, str):
         content = str(content)
-    raw_tool_calls = msg.get("tool_calls") or []
+    # 部分 API 将 tool_calls 放在 choice 下而非 choice.message 下，兼容两种格式
+    raw_tool_calls = msg.get("tool_calls") or choice.get("tool_calls") or []
     tool_calls: List[ToolCallPayload] = []
     for tc in raw_tool_calls:
         if not isinstance(tc, dict):
@@ -208,6 +209,12 @@ def _call_openai_chat_with_tools(
         else:
             args = {}
         tool_calls.append({"id": tid, "name": name, "arguments": args})
+    if tool_calls:
+        logger.info(
+            "llm returned %d tool_calls: %s",
+            len(tool_calls),
+            [t.get("name") for t in tool_calls],
+        )
     usage_obj = obj.get("usage") or {}
     usage = LLMUsage(
         input_tokens=usage_obj.get("prompt_tokens"),

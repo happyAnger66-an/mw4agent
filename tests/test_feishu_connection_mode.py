@@ -18,16 +18,19 @@ async def test_feishu_channel_defaults_to_webhook_mode():
 
 
 @pytest.mark.asyncio
-async def test_feishu_channel_websocket_mode_raises_not_implemented():
+async def test_feishu_channel_websocket_mode_raises_not_implemented(monkeypatch):
+    # 强制“无凭证”路径，避免在已安装 lark-oapi 且配置了凭证时进入真实 WS 连接导致挂死。
+    monkeypatch.setenv("FEISHU_APP_ID", "")
+    monkeypatch.setenv("FEISHU_APP_SECRET", "")
+    def _no_channels_config(section, default=None):
+        return {} if section == "channels" else (default or {})
+
+    monkeypatch.setattr("mw4agent.config.read_root_section", _no_channels_config)
     ch = FeishuChannel(connection_mode="websocket")
 
-    # 如果未安装 lark-oapi，则应抛出 RuntimeError 提示依赖缺失；
-    # 若已安装，则此测试可以被跳过或在实际集成环境中调整。
-    try:
+    # 未安装 lark-oapi 时抛出“需安装 lark-oapi”；无凭证时抛出“需配置 FEISHU_APP_ID/APP_SECRET”。
+    with pytest.raises(RuntimeError) as exc_info:
         await ch.run_monitor(on_inbound=_dummy_on_inbound)
-    except RuntimeError as exc:
-        # In environments without lark-oapi or required env vars, FeishuChannel
-        # should surface a clear RuntimeError message.
-        msg = str(exc)
-        assert "lark-oapi" in msg or "FEISHU_APP_ID" in msg
+    msg = str(exc_info.value)
+    assert "lark-oapi" in msg or "FEISHU_APP_ID" in msg
 

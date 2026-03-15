@@ -8,6 +8,8 @@ from .search import (
     list_memory_files,
     search,
     read_file,
+    write_memory_file,
+    is_allowed_memory_write_path,
     MemorySearchResult,
     MemoryReadResult,
 )
@@ -16,6 +18,8 @@ __all__ = [
     "list_memory_files",
     "search",
     "read_file",
+    "write_memory_file",
+    "is_allowed_memory_write_path",
     "MemorySearchResult",
     "MemoryReadResult",
 ]

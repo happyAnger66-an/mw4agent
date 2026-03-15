@@ -35,7 +35,10 @@ class WriteTool(AgentTool):
     def __init__(self) -> None:
         super().__init__(
             name="write",
-            description="Write content to a file. Path is relative to workspace or absolute within workspace. Creates parent directories if needed.",
+            description=(
+                "Write content to a file. Path is relative to workspace (e.g. MEMORY.md, memory/notes.md). "
+                "Creates parent directories if needed. Writing to MEMORY.md or memory/*.md persists to long-term memory."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
