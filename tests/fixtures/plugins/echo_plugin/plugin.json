@@ -1,0 +1,6 @@
+{
+  "name": "echo-plugin",
+  "version": "0.1.0",
+  "description": "Minimal plugin that registers an echo tool",
+  "tools_module": "tools"
+}

@@ -5,10 +5,14 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from ...skills import get_default_skill_manager
+from ...plugin.loader import get_plugin_skill_source
 
 
 def build_skill_snapshot() -> Dict[str, Any]:
-    """Build a minimal skills snapshot from all known skills.
+    """Build a minimal skills snapshot from all known skills (default manager + plugin skills).
+
+    Plugin skills are merged after default skills; duplicate names are resolved by
+    keeping the default (main) skill so main wins.
 
     Snapshot 结构（示例）：
     {
@@ -21,7 +25,13 @@ def build_skill_snapshot() -> Dict[str, Any]:
     }
     """
     mgr = get_default_skill_manager()
-    all_skills: Dict[str, Dict[str, Any]] = mgr.read_all_skills()
+    main_skills: Dict[str, Dict[str, Any]] = mgr.read_all_skills()
+    plugin_skills: Dict[str, Dict[str, Any]] = get_plugin_skill_source().read_all_skills()
+    # Main wins on duplicate name: start with main, then add plugin-only names
+    all_skills: Dict[str, Dict[str, Any]] = dict(main_skills)
+    for k, v in plugin_skills.items():
+        if k not in all_skills:
+            all_skills[k] = v
     items: List[Dict[str, Any]] = []
     lines: List[str] = []
 

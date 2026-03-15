@@ -1,0 +1,6 @@
+{
+  "name": "skill-plugin",
+  "version": "0.1.0",
+  "description": "Plugin that adds skills from skills_dir",
+  "skills_dir": "skills"
+}

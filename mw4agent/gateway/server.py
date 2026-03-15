@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from ..agents.runner.runner import AgentRunner
 from ..agents.session.manager import SessionManager
 from ..agents.types import AgentRunParams
+from ..plugin import load_plugins
 from .state import DedupeEntry, GatewayState, RunSnapshot
 from .types import AgentEvent
 
@@ -51,6 +52,9 @@ def create_app(
     session_file: str = "mw4agent.sessions.json",
     node_token: Optional[str] = None,
 ) -> FastAPI:
+    # Load plugins (register tools from MW4AGENT_PLUGIN_DIR) before creating runner
+    load_plugins()
+
     app = FastAPI(title="MW4Agent Gateway", version="0.1")
     if node_token is None:
         t = os.environ.get("GATEWAY_NODE_TOKEN")

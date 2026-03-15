@@ -33,6 +33,15 @@ python -m mw4agent --help
 - `config`：读写加密配置文件（`ConfigManager` 封装）
 - `configuration`：配置 LLM provider/model 等（支持交互式向导）
 
+### 1.1 插件
+
+可通过插件扩展 Agent 的**工具**与**技能**。启用方式：
+
+- **环境变量**：`export MW4AGENT_PLUGIN_DIR=/path/to/plugin`（多个路径用 `:` 或 `,` 分隔）
+- **配置文件**：在 `~/.mw4agent/mw4agent.json` 的 `plugins` 段中配置 `plugin_dirs`、可选 `plugins_enabled`
+
+Gateway 启动时会自动加载插件并注册工具、合并技能。详见 [插件使用与配置](../architecture/plugins.md)。
+
 ---
 
 ## 2. `gateway` 命令组

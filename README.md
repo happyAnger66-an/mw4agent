@@ -51,7 +51,7 @@ Dashboard 是内嵌在 Gateway 里的 Web 控制台，用于在浏览器里与 A
    - **右侧**：两个标签——**Gateway** 显示 WebSocket 连接状态、RPC 端点、最近 runId、事件总数；**事件** 分条展示当前收到的 WebSocket 事件（lifecycle / tool / assistant）。
    - **顶部**：主题切换（浅色 / 柔和暗色 / 深色）、中英文切换、连接状态。
 
-若在本地已启动 Gateway，将浏览器指向上述地址即可使用。界面示意如下（将实际截图保存为 `docs/images/dashboard-screenshot.png` 即可在文档中显示）：
+若在本地已启动 Gateway，将浏览器指向上述地址即可使用。界面示意如下：
 
 ![Dashboard 界面](docs/images/dashboard.png)
 
