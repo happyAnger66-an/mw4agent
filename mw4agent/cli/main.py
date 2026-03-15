@@ -11,6 +11,7 @@ from .channels.register import register_channels_cli
 from .agent.register import register_agent_cli
 from .configuration import register_configuration_cli
 from .dashboard import register_dashboard_cli
+from .memory import register_memory_cli
 from .. import __version__
 from ..log import setup_logging
 
@@ -132,6 +133,18 @@ def register_core_commands(program: click.Group, ctx: ProgramContext) -> None:
         register=register_dashboard_cli,
     )
     get_registry().register_entry(dashboard_entry)
+
+    memory_entry = CommandEntry(
+        commands=[
+            {
+                "name": "memory",
+                "description": "Search, inspect memory files (MEMORY.md, memory/*.md)",
+                "has_subcommands": True,
+            }
+        ],
+        register=register_memory_cli,
+    )
+    get_registry().register_entry(memory_entry)
 
 
 def register_commands(

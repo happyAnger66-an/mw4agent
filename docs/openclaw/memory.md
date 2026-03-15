@@ -271,3 +271,32 @@ OpenClaw 的 Memory 子系统为 Agent 提供“代码+文档+会话”的长期
 
 这样可以在 Python 侧实现一个结构类似的 Memory 子系统，为 MW4Agent 的 Feishu 通道、Gateway 和 Agent 工具提供更强的“上下文记忆”能力。
 
+---
+
+## 7. 会话文件短期记忆架构小结 + MW4Agent 实现
+
+### 7.1 会话文件作为短期记忆
+
+OpenClaw 的**短期记忆**与长期记忆共用同一套索引与检索接口，区别只在**数据来源**和**同步策略**：
+
+- **来源**：`sources` 中的 `"sessions"` 对应会话转录文件（如 `state/agents/{agentId}/sessions/*.jsonl`），与 `"memory"`（MEMORY.md、memory/*.md 等）一起被切片、向量化后写入同一 SQLite。
+- **同步**：`sync.sessions.deltaBytes` / `deltaMessages` 控制“会话累计变化多少再写索引”；`onSessionStart` / `onSearch` 可在会话开始或搜索前触发一次同步，保证近期对话可被搜到。
+- **检索**：仍走统一的 `search()`，在混合打分 + **时间衰减**下，与当前 session 相关的最近消息会自然排在前面，无需单独“短期记忆 API”。
+
+因此“会话文件短期记忆”并不是独立系统，而是：**会话日志 → 增量写入同一向量/FTS 索引 → 与长期记忆一起被 search**。
+
+### 7.2 MW4Agent Phase 1：memory_tool 与 memory-cli
+
+MW4Agent 已实现与 OpenClaw 对齐的 **memory_tool**（Agent 工具）和 **memory-cli**（CLI），当前为**仅文件、无向量**的 Phase 1：
+
+| 组件 | 说明 |
+|------|------|
+| **mw4agent.memory** | 模块：`list_memory_files(workspace_dir)`、`search(query, workspace_dir, max_results=10, min_score=0)`、`read_file(workspace_dir, rel_path, from_line=None, lines=None)`。来源仅限工作区 `MEMORY.md`、`memory.md`、`memory/*.md`。检索为关键词匹配（无 embedding）。 |
+| **memory_search** | Agent 工具：参数 `query`（必填）、`maxResults`、`minScore`；返回 `results`（path、startLine、endLine、snippet、score）。无可用时返回 `disabled: true`。 |
+| **memory_get** | Agent 工具：参数 `path`（必填）、`from`、`lines`；返回 `path`、`text`、`missing`。仅允许读取 `list_memory_files` 中的路径。 |
+| **memory status** | CLI：列出工作区、provider（file）、记忆文件列表。 |
+| **memory search** | CLI：`memory search <query>` 或 `--query`，支持 `--max-results`、`--min-score`、`--json`。 |
+| **memory get** | CLI：`memory get <path>`，支持 `--from`、`--lines`、`--json`。 |
+
+Agent 通过 `workspace_dir`（Runner 的 tool context）解析工作区；CLI 通过 `--workspace` 或当前目录。后续可在此之上增加会话文件源（如将会话日志落盘为 jsonl/md 并纳入 `list_memory_files` 或单独 source）、向量索引与混合检索，使行为与 OpenClaw §2–§5 更一致。
+
