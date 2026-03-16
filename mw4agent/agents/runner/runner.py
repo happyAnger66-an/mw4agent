@@ -30,16 +30,18 @@ from ...config.paths import get_default_workspace_dir
 from ...llm import generate_reply, generate_reply_with_tools, LLMUsage
 from ..reasoning import split_reasoning_and_text
 from ..skills.snapshot import build_skill_snapshot
+from ..tools.policy import resolve_tool_policy_config, filter_tools_by_policy
 
 from mw4agent.log import get_logger
 logger = get_logger(__name__)
 
 MAX_TOOL_ROUNDS = 16
 
+
 class AgentRunner:
     """
     Agent Runner - executes agent turns
-    
+
     Similar to OpenClaw's runEmbeddedPiAgent function.
     """
 
@@ -67,12 +69,12 @@ class AgentRunner:
     ) -> AgentRunResult:
         """
         Run an agent turn
-        
+
         Similar to runEmbeddedPiAgent in OpenClaw.
-        
+
         Args:
             params: Agent run parameters
-            
+
         Returns:
             AgentRunResult with payloads and metadata
         """
@@ -106,7 +108,7 @@ class AgentRunner:
             # Enqueue in command queue (serialize per session)
             async def execute_task():
                 return await self._execute_agent_turn(params, run_id, session_entry)
-            
+
             result = await self.queue.enqueue(
                 session_key=session_key,
                 run_id=run_id,
@@ -187,7 +189,7 @@ class AgentRunner:
         started = time.time()
 
         # --- Attach skills snapshot to session & build prompt --------------
-        #logger.info(f"Building skills snapshot for session {session_entry.session_id}")
+        # logger.info(f"Building skills snapshot for session {session_entry.session_id}")
         skills_snapshot = build_skill_snapshot()
         skills_prompt = ''
         if skills_snapshot.get("prompt"):
@@ -274,7 +276,8 @@ class AgentRunner:
             )
 
             if skills_prompt:
-                composed_with_skills = skills_prompt + "\n\n[User]\n" + composed_message
+                composed_with_skills = skills_prompt + \
+                    "\n\n[User]\n" + composed_message
             else:
                 composed_with_skills = composed_message
 
@@ -283,7 +286,14 @@ class AgentRunner:
             reply_text, provider, model, usage = generate_reply(llm_params)
         else:
             # No tool plan → try tool-call loop if we have tools and non-echo provider.
-            tool_definitions = self.tool_registry.get_tool_definitions()
+            from ...config import get_default_config_manager
+
+            cfg_mgr = get_default_config_manager()
+            tools_policy = resolve_tool_policy_config(cfg_mgr)
+            all_tools = self.tool_registry.list_tools()
+            allowed_tools = filter_tools_by_policy(all_tools, tools_policy)
+            tool_definitions = [t.to_dict() for t in allowed_tools]
+
             tool_context = {
                 "run_id": run_id,
                 "session_key": params.session_key,
@@ -291,7 +301,8 @@ class AgentRunner:
                 "workspace_dir": params.workspace_dir or get_default_workspace_dir(),
             }
             use_tool_loop = bool(tool_definitions)
-            logger.info(f"agent_turn use_tool_loop: {use_tool_loop}, tool_definitions: {tool_definitions}")
+            logger.info(
+                f"agent_turn use_tool_loop: {use_tool_loop}, tool_definitions: {tool_definitions}")
             if use_tool_loop:
                 reply_text, provider, model, usage = await self._run_tool_loop(
                     params_for_llm,
@@ -301,10 +312,12 @@ class AgentRunner:
                 )
             else:
                 await asyncio.sleep(0)
-                reply_text, provider, model, usage = generate_reply(params_for_llm)
+                reply_text, provider, model, usage = generate_reply(
+                    params_for_llm)
 
         # Emit assistant event(s): optionally reasoning then text (ReasoningLevel).
-        reasoning_level = (params.reasoning_level or "").strip().lower() or "off"
+        reasoning_level = (
+            params.reasoning_level or "").strip().lower() or "off"
         reasoning, text_only = split_reasoning_and_text(reply_text or "")
         if reasoning_level in ("on", "stream") and reasoning:
             await self.event_stream.emit(
@@ -429,10 +442,12 @@ class AgentRunner:
                     "tool %s result: success=%s %s",
                     name,
                     result.success,
-                    (str(result.result)[:120] if result.success else result.error or "")[:120],
+                    (str(result.result)[
+                     :120] if result.success else result.error or "")[:120],
                 )
                 if result.success:
-                    result_str = json.dumps(result.result, ensure_ascii=False) if isinstance(result.result, dict) else str(result.result)
+                    result_str = json.dumps(result.result, ensure_ascii=False) if isinstance(
+                        result.result, dict) else str(result.result)
                 else:
                     result_str = f"Error: {result.error or result.result}"
                 messages.append({
@@ -451,7 +466,7 @@ class AgentRunner:
     ) -> Any:
         """
         Execute a tool call
-        
+
         Similar to tool execution in OpenClaw's pi-embedded-runner.
         """
         tool = self.tool_registry.get_tool(tool_name)
