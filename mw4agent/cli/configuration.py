@@ -433,12 +433,23 @@ def _auth_wizard_set() -> None:
                 break
             deny_list.append(v)
 
+    fs_workspace_only: Optional[bool] = None
+    if scope == "global":
+        fs_workspace_only = _prompt_yesno(
+            "Restrict filesystem tools to workspace only? (tools.fs.workspaceOnly)",
+            default=False,
+        )
+
     current = read_root_config()
     tools = dict(current.get("tools") or {})
     kind, key = _tools_cfg_key_for_scope(scope, channel=channel, user_id=user_id, is_owner=is_owner)
     if kind == "global":
         old = tools
         tools = _merge_policy_dict(old, profile=profile, allow=allow_list or None, deny=deny_list or None, clear_allow=False, clear_deny=False)
+        if fs_workspace_only is not None:
+            fs = dict(tools.get("fs") or {})
+            fs["workspaceOnly"] = bool(fs_workspace_only)
+            tools["fs"] = fs
     else:
         bucket = dict(tools.get(kind) or {})
         old = dict(bucket.get(key) or {})
@@ -617,6 +628,12 @@ def register_configuration_cli(program: click.Group, _ctx) -> None:
     @click.option("--deny", "deny_list", multiple=True, required=False, help="Deny tool name or glob (repeatable)")
     @click.option("--clear-allow", is_flag=True, default=False, help="Clear allow list before adding")
     @click.option("--clear-deny", is_flag=True, default=False, help="Clear deny list before adding")
+    @click.option(
+        "--fs-workspace-only/--no-fs-workspace-only",
+        "fs_workspace_only",
+        default=None,
+        help="Global only: set tools.fs.workspaceOnly (restrict read/write paths to workspace).",
+    )
     def auth_set(
         scope: str,
         channel: Optional[str],
@@ -627,6 +644,7 @@ def register_configuration_cli(program: click.Group, _ctx) -> None:
         deny_list: tuple[str, ...],
         clear_allow: bool,
         clear_deny: bool,
+        fs_workspace_only: Optional[bool],
     ) -> None:
         current = read_root_config()
         tools = dict(current.get("tools") or {})
@@ -640,7 +658,13 @@ def register_configuration_cli(program: click.Group, _ctx) -> None:
                 clear_allow=clear_allow,
                 clear_deny=clear_deny,
             )
+            if fs_workspace_only is not None:
+                fs = dict(tools.get("fs") or {})
+                fs["workspaceOnly"] = bool(fs_workspace_only)
+                tools["fs"] = fs
         else:
+            if fs_workspace_only is not None:
+                raise click.UsageError("--fs-workspace-only only applies to scope=global")
             bucket = dict(tools.get(kind) or {})
             old = dict(bucket.get(key) or {})
             bucket[key] = _merge_policy_dict(

@@ -5,6 +5,9 @@
 		},
 		{
 			"path": "../../../codes/agents/openclaw"
+		},
+		{
+			"path": "../../../codes/clawbots/openclaw"
 		}
 	],
 	"settings": {}

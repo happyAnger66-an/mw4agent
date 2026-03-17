@@ -6,7 +6,8 @@ import asyncio
 import click
 
 from ...agents.runner.runner import AgentRunner
-from ...agents.session.manager import SessionManager
+from ...agents.session import MultiAgentSessionManager, SessionManager
+from ...agents.agent_manager import AgentManager
 from ...channels.dispatcher import ChannelDispatcher, ChannelRuntime
 from ...channels.plugins.console import ConsoleChannel
 from ...channels.plugins.telegram import TelegramChannel
@@ -25,20 +26,24 @@ def register_channels_cli(program: click.Group, _ctx) -> None:
         pass
 
     @console_group.command(name="run", help="Run the console channel monitor")
-    @click.option("--session-file", default="mw4agent.sessions.json", show_default=True)
+    @click.option("--agent-id", default="main", show_default=True, help="Agent id (multi-agent mode)")
+    @click.option("--session-file", default="", show_default=False, help="Legacy: single session store path")
     @click.option(
         "--gateway-url",
         default="",
         envvar="MW4AGENT_GATEWAY_URL",
         help="If set, channel calls agent via Gateway RPC instead of direct; e.g. http://127.0.0.1:18790",
     )
-    def run_console(session_file: str, gateway_url: str) -> None:
+    def run_console(agent_id: str, session_file: str, gateway_url: str) -> None:
         async def _run() -> None:
             registry = get_channel_registry()
             if not registry.get_plugin("console"):
                 registry.register_plugin(ConsoleChannel())
 
-            session_manager = SessionManager(session_file)
+            if session_file and session_file.strip():
+                session_manager = SessionManager(session_file.strip())
+            else:
+                session_manager = MultiAgentSessionManager(agent_manager=AgentManager())
             runner = AgentRunner(session_manager)
             gateway_base_url = gateway_url.strip() or None
             runtime = ChannelRuntime(
@@ -56,7 +61,8 @@ def register_channels_cli(program: click.Group, _ctx) -> None:
         pass
 
     @telegram_group.command(name="run", help="Run the Telegram bot channel (long polling)")
-    @click.option("--session-file", default="mw4agent.sessions.json", show_default=True)
+    @click.option("--agent-id", default="main", show_default=True, help="Agent id (multi-agent mode)")
+    @click.option("--session-file", default="", show_default=False, help="Legacy: single session store path")
     @click.option("--bot-token", envvar="TELEGRAM_BOT_TOKEN", help="Telegram bot token (env TELEGRAM_BOT_TOKEN)")
     @click.option(
         "--gateway-url",
@@ -64,13 +70,16 @@ def register_channels_cli(program: click.Group, _ctx) -> None:
         envvar="MW4AGENT_GATEWAY_URL",
         help="If set, channel calls agent via Gateway RPC; e.g. http://127.0.0.1:18790",
     )
-    def run_telegram(session_file: str, bot_token: str | None, gateway_url: str) -> None:
+    def run_telegram(agent_id: str, session_file: str, bot_token: str | None, gateway_url: str) -> None:
         async def _run() -> None:
             registry = get_channel_registry()
             if not registry.get_plugin("telegram"):
                 registry.register_plugin(TelegramChannel(bot_token=bot_token))
 
-            session_manager = SessionManager(session_file)
+            if session_file and session_file.strip():
+                session_manager = SessionManager(session_file.strip())
+            else:
+                session_manager = MultiAgentSessionManager(agent_manager=AgentManager())
             runner = AgentRunner(session_manager)
             gateway_base_url = gateway_url.strip() or None
             runtime = ChannelRuntime(
@@ -88,7 +97,8 @@ def register_channels_cli(program: click.Group, _ctx) -> None:
         pass
 
     @webhook_group.command(name="run", help="Run the HTTP webhook channel server")
-    @click.option("--session-file", default="mw4agent.sessions.json", show_default=True)
+    @click.option("--agent-id", default="main", show_default=True, help="Agent id (multi-agent mode)")
+    @click.option("--session-file", default="", show_default=False, help="Legacy: single session store path")
     @click.option("--host", default="0.0.0.0", show_default=True, help="Webhook server host")
     @click.option("--port", default=8080, show_default=True, type=int, help="Webhook server port")
     @click.option("--path", default="/webhook", show_default=True, help="Webhook path")
@@ -98,13 +108,16 @@ def register_channels_cli(program: click.Group, _ctx) -> None:
         envvar="MW4AGENT_GATEWAY_URL",
         help="If set, channel calls agent via Gateway RPC; e.g. http://127.0.0.1:18790",
     )
-    def run_webhook(session_file: str, host: str, port: int, path: str, gateway_url: str) -> None:
+    def run_webhook(agent_id: str, session_file: str, host: str, port: int, path: str, gateway_url: str) -> None:
         async def _run() -> None:
             registry = get_channel_registry()
             if not registry.get_plugin("webhook"):
                 registry.register_plugin(WebhookChannel(host=host, port=port, path=path))
 
-            session_manager = SessionManager(session_file)
+            if session_file and session_file.strip():
+                session_manager = SessionManager(session_file.strip())
+            else:
+                session_manager = MultiAgentSessionManager(agent_manager=AgentManager())
             runner = AgentRunner(session_manager)
             gateway_base_url = gateway_url.strip() or None
             runtime = ChannelRuntime(
@@ -122,7 +135,8 @@ def register_channels_cli(program: click.Group, _ctx) -> None:
         pass
 
     @feishu_group.command(name="run", help="Run the Feishu channel server (webhook or websocket)")
-    @click.option("--session-file", default="mw4agent.sessions.json", show_default=True)
+    @click.option("--agent-id", default="main", show_default=True, help="Agent id (multi-agent mode)")
+    @click.option("--session-file", default="", show_default=False, help="Legacy: single session store path")
     @click.option("--host", default="0.0.0.0", show_default=True, help="Feishu webhook server host")
     @click.option("--port", default=8081, show_default=True, type=int, help="Feishu webhook server port")
     @click.option("--path", default="/feishu/webhook", show_default=True, help="Feishu webhook path")
@@ -140,6 +154,7 @@ def register_channels_cli(program: click.Group, _ctx) -> None:
         help="If set, channel calls agent via Gateway RPC; e.g. http://127.0.0.1:18790",
     )
     def run_feishu(
+        agent_id: str,
         session_file: str,
         host: str,
         port: int,
@@ -159,7 +174,10 @@ def register_channels_cli(program: click.Group, _ctx) -> None:
                     )
                 )
 
-            session_manager = SessionManager(session_file)
+            if session_file and session_file.strip():
+                session_manager = SessionManager(session_file.strip())
+            else:
+                session_manager = MultiAgentSessionManager(agent_manager=AgentManager())
             runner = AgentRunner(session_manager)
             gateway_base_url = gateway_url.strip() or None
             runtime = ChannelRuntime(

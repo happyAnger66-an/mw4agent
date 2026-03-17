@@ -101,7 +101,11 @@ type CommandAuthorization = {
      - `minimal`：仅基础状态类工具（如 `session_status`）；  
      - `coding`：文件系统 / 运行时 / 会话 / 内存相关工具；  
      - `messaging`：仅消息发送与路由工具；  
-     - `full`：近乎不限制的完整工具集。
+     - `full`：近乎不限制的完整工具集（不再通过 profile 过滤工具）。
+
+> 注意：在 OpenClaw 中（以及本仓库对齐实现中），`tools.profile` 只控制“暴露给 LLM 的工具集合”。
+> 文件系统工具（`read` / `write` / `edit` / `apply_patch`）是否限制在 workspace 目录内由 `tools.fs.workspaceOnly` 控制，
+> 与 `profile: full` 无直接绑定关系。
 2. **Provider Profile 策略**（`tools.byProvider.profile`）  
    - 按 LLM provider（OpenAI / Anthropic / xAI 等）进一步约束，例如对带 web 能力的模型禁用 OpenClaw 自带 `web_search`。  
 3. **全局 allow/deny**（`tools.allow` / `tools.deny`）  

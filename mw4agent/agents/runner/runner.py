@@ -25,6 +25,7 @@ from ..session.manager import SessionManager
 from ..tools.registry import get_tool_registry
 from ..tools.base import ToolResult
 from ..tools.policy import resolve_tool_policy_config, resolve_effective_policy_for_context, filter_tools_by_policy
+from ..tools.fs_policy import resolve_tool_fs_policy_config
 from ..queue.manager import CommandQueue
 from ..events.stream import EventStream
 from ...config.paths import get_default_workspace_dir
@@ -247,11 +248,32 @@ class AgentRunner:
             )
             tool_call_id = str(tool_plan.get("tool_call_id") or uuid.uuid4())
 
+            # For direct tool-call protocol runs, still honor tools policy so
+            # implementations can relax internal guards (e.g. workspace root) in
+            # profile=full.
+            from ...config import get_default_config_manager
+
+            cfg_mgr = get_default_config_manager()
+            base_policy = resolve_tool_policy_config(cfg_mgr)
+            effective_policy = resolve_effective_policy_for_context(
+                cfg_mgr,
+                base_policy=base_policy,
+                channel=params.channel,
+                user_id=params.sender_id,
+                sender_is_owner=params.sender_is_owner,
+                command_authorized=params.command_authorized,
+            )
+            fs_policy = resolve_tool_fs_policy_config(cfg_mgr)
+
             tool_context = {
                 "run_id": run_id,
                 "session_key": params.session_key,
                 "agent_id": params.agent_id,
                 "workspace_dir": params.workspace_dir or get_default_workspace_dir(),
+                "tools_profile": effective_policy.profile,
+                "tools_allow": effective_policy.allow,
+                "tools_deny": effective_policy.deny,
+                "tools_fs_workspace_only": fs_policy.workspace_only,
             }
             tool_result = await self.execute_tool(
                 tool_call_id=tool_call_id,
@@ -299,6 +321,7 @@ class AgentRunner:
                 sender_is_owner=params.sender_is_owner,
                 command_authorized=params.command_authorized,
             )
+            fs_policy = resolve_tool_fs_policy_config(cfg_mgr)
 
             all_tools = self.tool_registry.list_tools()
             tools_after_policy = filter_tools_by_policy(all_tools, effective_policy)
@@ -317,6 +340,10 @@ class AgentRunner:
                 "sender_id": params.sender_id,
                 "sender_is_owner": params.sender_is_owner,
                 "command_authorized": params.command_authorized,
+                "tools_profile": effective_policy.profile,
+                "tools_allow": effective_policy.allow,
+                "tools_deny": effective_policy.deny,
+                "tools_fs_workspace_only": fs_policy.workspace_only,
             }
             use_tool_loop = bool(tool_definitions)
             logger.info(
@@ -362,10 +389,19 @@ class AgentRunner:
         )
 
         # Update session metadata.
-        self.session_manager.update_session(
-            session_entry.session_id,
-            message_count=session_entry.message_count + 1,
-        )
+        try:
+            # Multi-agent session managers may require agent scoping for updates.
+            self.session_manager.update_session(  # type: ignore[call-arg]
+                session_entry.session_id,
+                agent_id=getattr(session_entry, "agent_id", None),
+                message_count=session_entry.message_count + 1,
+            )
+        except TypeError:
+            # Back-compat: single-store session managers.
+            self.session_manager.update_session(
+                session_entry.session_id,
+                message_count=session_entry.message_count + 1,
+            )
 
         duration_ms = int((time.time() - started) * 1000)
 

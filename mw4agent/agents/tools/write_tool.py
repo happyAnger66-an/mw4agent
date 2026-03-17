@@ -67,6 +67,7 @@ class WriteTool(AgentTool):
         context: Optional[Dict[str, Any]] = None,
     ) -> ToolResult:
         workspace_dir = (context or {}).get("workspace_dir") or os.getcwd()
+        workspace_only = bool((context or {}).get("tools_fs_workspace_only") is True)
         path = params.get("path") or params.get("file_path")
         path = path.strip() if isinstance(path, str) else None
         if not path:
@@ -80,7 +81,8 @@ class WriteTool(AgentTool):
 
         try:
             resolved = _resolve_path(path, workspace_dir)
-            _ensure_under_root(resolved, workspace_dir)
+            if workspace_only:
+                _ensure_under_root(resolved, workspace_dir)
         except (ValueError, PermissionError) as e:
             return ToolResult(success=False, result={}, error=str(e))
 

@@ -8,6 +8,7 @@ from typing import Optional
 import click
 
 from ..context import ProgramContext
+from ...agents.agent_manager import AgentManager
 from ...gateway.client import call_rpc
 from ...agents.tools import GatewayLsTool
 
@@ -21,11 +22,43 @@ def register_agent_cli(program: click.Group, ctx: ProgramContext) -> None:
         """Agent command group."""
         pass
 
+    @agent_group.command("create", help="Create a new agent (agent_dir + workspace_dir)")
+    @click.argument("agent_id", nargs=1)
+    @click.option("--agent-dir", default="", help="Override agent_dir (default: ~/.mw4agent/agents/<id>)")
+    @click.option(
+        "--workspace-dir",
+        default="",
+        help="Override workspace_dir (default: <agent_dir>/workspace)",
+    )
+    def agent_create(agent_id: str, agent_dir: str, workspace_dir: str) -> None:
+        mgr = AgentManager()
+        cfg = mgr.get_or_create(
+            agent_id,
+            agent_dir=agent_dir.strip() or None,
+            workspace_dir=workspace_dir.strip() or None,
+        )
+        click.echo(jsonlib.dumps({"ok": True, "agent": cfg.__dict__}, ensure_ascii=False, indent=2))
+
+    @agent_group.command("list", help="List agents under ~/.mw4agent/agents")
+    def agent_list() -> None:
+        mgr = AgentManager()
+        mgr.ensure_main()
+        click.echo(jsonlib.dumps({"agents": mgr.list_agents()}, ensure_ascii=False, indent=2))
+
+    @agent_group.command("show", help="Show agent config")
+    @click.argument("agent_id", nargs=1, required=False)
+    def agent_show(agent_id: Optional[str] = None) -> None:
+        mgr = AgentManager()
+        aid = (agent_id or "").strip() or "main"
+        cfg = mgr.get(aid) or mgr.get_or_create(aid)
+        click.echo(jsonlib.dumps({"agent": cfg.__dict__}, ensure_ascii=False, indent=2))
+
     @agent_group.command("run", help="Run one agent turn via Gateway RPC (optionally with a tool)")
     @click.option("-m", "--message", required=True, help="User message to send to the agent")
     @click.option("--url", help="Gateway base URL (http://host:port)")
     @click.option("--session-key", default="cli:default", show_default=True, help="Session key")
     @click.option("--session-id", default="cli-default", show_default=True, help="Session id")
+    @click.option("--agent-id", default="main", show_default=True, help="Target agent id")
     @click.option(
         "--with-gateway-ls",
         is_flag=True,
@@ -46,6 +79,7 @@ def register_agent_cli(program: click.Group, ctx: ProgramContext) -> None:
         url: Optional[str],
         session_key: str,
         session_id: str,
+        agent_id: str,
         with_gateway_ls: bool,
         ls_path: str,
         timeout: int,
@@ -84,7 +118,7 @@ def register_agent_cli(program: click.Group, ctx: ProgramContext) -> None:
             "message": message,
             "sessionKey": session_key,
             "sessionId": session_id,
-            "agentId": "cli",
+            "agentId": agent_id.strip() or "main",
             "idempotencyKey": idem,
         }
         if extra_system_prompt:

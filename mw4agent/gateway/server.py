@@ -23,9 +23,9 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..agents.runner.runner import AgentRunner
-from ..agents.session.manager import SessionManager
+from ..agents.session import MultiAgentSessionManager, SessionManager
 from ..agents.types import AgentRunParams
-from ..config.paths import ensure_workspace_dir, get_default_workspace_dir
+from ..agents.agent_manager import AgentManager
 from ..log import get_logger
 from ..memory.bootstrap import load_bootstrap_system_prompt
 from ..plugin import load_plugins
@@ -55,7 +55,7 @@ def _is_safe_rel_path(path: str) -> bool:
 
 def create_app(
     *,
-    session_file: str = "mw4agent.sessions.json",
+    session_file: str = "",
     node_token: Optional[str] = None,
 ) -> FastAPI:
     # Load plugins (register tools from MW4AGENT_PLUGIN_DIR) before creating runner
@@ -67,7 +67,13 @@ def create_app(
     else:
         node_token = node_token.strip() if isinstance(node_token, str) and node_token.strip() else None
     state = GatewayState(node_token=node_token)
-    session_manager = SessionManager(session_file)
+    agent_manager = AgentManager()
+    # Back-compat: if a session_file is provided, use a single store.
+    # Default: multi-agent stores under ~/.mw4agent/agents/<agentId>/sessions/sessions.json
+    if session_file and session_file.strip():
+        session_manager = SessionManager(session_file.strip())
+    else:
+        session_manager = MultiAgentSessionManager(agent_manager=agent_manager)
     runner = AgentRunner(session_manager)
 
     # --- Feishu channel: if configured, webhook 挂载到 app 或 websocket 随进程启动（由配置 connection_mode 决定）---
@@ -391,7 +397,8 @@ def create_app(
 
             async def _run() -> None:
                 try:
-                    workspace_dir = ensure_workspace_dir()
+                    # Resolve per-agent workspace dir (auto-creates agent if missing).
+                    workspace_dir = agent_manager.get_or_create(agent_id).workspace_dir
                     bootstrap = load_bootstrap_system_prompt(workspace_dir)
                     extra = str(params.get("extraSystemPrompt") or "").strip()
                     extra_system_prompt = (
