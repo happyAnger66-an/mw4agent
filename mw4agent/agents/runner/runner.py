@@ -39,14 +39,110 @@ logger = get_logger(__name__)
 
 from ..session.transcript import (
     append_messages as append_transcript_messages,
+    append_compaction,
+    branch_to_parent,
+    build_messages_from_leaf,
     drop_trailing_orphan_user,
+    format_compaction_summary,
+    get_leaf_entry_meta,
     limit_history_user_turns,
     read_messages as read_transcript_messages,
     resolve_history_limit_turns,
     resolve_session_transcript_path,
+    split_by_user_turns,
 )
 
 MAX_TOOL_ROUNDS = 16
+
+
+def _count_user_turns(messages: List[Dict[str, Any]]) -> int:
+    return sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "user")
+
+
+def _read_session_compaction_cfg(root_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    session = root_cfg.get("session") if isinstance(root_cfg.get("session"), dict) else {}
+    comp = session.get("compaction") if isinstance(session.get("compaction"), dict) else {}
+    return comp
+
+
+def _auto_compact_if_needed(
+    *,
+    history_messages: List[Dict[str, Any]],
+    root_cfg: Dict[str, Any],
+    transcript_file: str,
+    transcript_session_id: str,
+    transcript_cwd: str,
+) -> List[Dict[str, Any]]:
+    """Auto trigger compaction and rewrite leaf chain to: [compaction] + tail."""
+    comp_cfg = _read_session_compaction_cfg(root_cfg)
+    enabled = comp_cfg.get("enabled")
+    if enabled is False:
+        return history_messages
+    # default enabled=true if config exists; otherwise disabled (no surprises)
+    if enabled is None and not comp_cfg:
+        return history_messages
+
+    keep_turns = comp_cfg.get("keepTurns") or comp_cfg.get("keep_turns") or 12
+    trigger_turns = comp_cfg.get("triggerTurns") or comp_cfg.get("trigger_turns") or 16
+    summary_max_chars = comp_cfg.get("summaryMaxChars") or comp_cfg.get("summary_max_chars") or 4000
+
+    try:
+        keep_turns = int(keep_turns)
+    except Exception:
+        keep_turns = 12
+    try:
+        trigger_turns = int(trigger_turns)
+    except Exception:
+        trigger_turns = 16
+    try:
+        summary_max_chars = int(summary_max_chars)
+    except Exception:
+        summary_max_chars = 4000
+
+    if keep_turns <= 0:
+        keep_turns = 1
+    if trigger_turns <= keep_turns:
+        trigger_turns = keep_turns + 1
+
+    user_turns = _count_user_turns(history_messages)
+    if user_turns < trigger_turns:
+        return history_messages
+
+    older, keep = split_by_user_turns(history_messages, keep_last_user_turns=keep_turns)
+    if not older or not keep:
+        return history_messages
+
+    # Avoid immediate re-compaction loops: if already starts with our marker, skip.
+    first = keep[0] if keep else None
+    if isinstance(first, dict) and first.get("role") == "system":
+        c = str(first.get("content") or "")
+        if "Session compaction summary (auto)" in c:
+            return history_messages
+
+    summary = format_compaction_summary(older, max_chars=summary_max_chars)
+    # Reset leaf so the new chain starts from compaction (OpenClaw-like "replace older context").
+    branch_to_parent(transcript_file=transcript_file, parent_id=None)
+    compaction_id = append_compaction(
+        transcript_file=transcript_file,
+        session_id=transcript_session_id,
+        cwd=transcript_cwd,
+        summary=summary,
+    )
+    # Rewrite the recent tail so leaf-chain reconstruction includes it after compaction.
+    append_transcript_messages(
+        transcript_file=transcript_file,
+        session_id=transcript_session_id,
+        cwd=transcript_cwd,
+        messages=keep,
+    )
+    logger.info(
+        "auto compaction triggered: user_turns=%s keep_turns=%s trigger_turns=%s compaction_id=%s",
+        user_turns,
+        keep_turns,
+        trigger_turns,
+        compaction_id,
+    )
+    return build_messages_from_leaf(transcript_file=transcript_file)
 
 
 class AgentRunner:
@@ -325,12 +421,32 @@ class AgentRunner:
             transcript_file = resolve_session_transcript_path(
                 agent_id=params.agent_id, session_id=session_entry.session_id
             )
-            history_messages = read_transcript_messages(transcript_file=transcript_file)
+            # Prefer leaf-based reconstruction so branch/resetLeaf is respected.
+            history_messages = build_messages_from_leaf(transcript_file=transcript_file)
+            # If transcript leaf ends with an orphan user message (crash/interruption),
+            # branch leaf back to parent so we don't generate invalid consecutive user turns.
+            leaf_id, parent_id, leaf_msg = get_leaf_entry_meta(transcript_file=transcript_file)
+            if isinstance(leaf_msg, dict) and leaf_msg.get("role") == "user" and parent_id:
+                branch_to_parent(transcript_file=transcript_file, parent_id=parent_id)
+                history_messages = build_messages_from_leaf(transcript_file=transcript_file)
+            # Final safety: drop trailing orphan user in memory view.
+            history_messages = drop_trailing_orphan_user(history_messages)
             history_messages = drop_trailing_orphan_user(history_messages)
             try:
                 root_cfg = cfg_mgr.read_config("mw4agent", default={})
             except Exception:
                 root_cfg = {}
+
+            # Auto compaction trigger: compact older turns into a system summary entry,
+            # then rewrite tail so leaf-based reconstruction sees summary + recent context.
+            history_messages = _auto_compact_if_needed(
+                history_messages=history_messages,
+                root_cfg=root_cfg if isinstance(root_cfg, dict) else {},
+                transcript_file=transcript_file,
+                transcript_session_id=session_entry.session_id,
+                transcript_cwd=params.workspace_dir or get_default_workspace_dir(),
+            )
+
             history_limit = resolve_history_limit_turns(
                 cfg=root_cfg if isinstance(root_cfg, dict) else {},
                 session_key=params.session_key,
@@ -359,6 +475,7 @@ class AgentRunner:
             tool_context = {
                 "run_id": run_id,
                 "session_key": params.session_key,
+                "session_id": session_entry.session_id,
                 "agent_id": params.agent_id,
                 "workspace_dir": params.workspace_dir or get_default_workspace_dir(),
                 "channel": params.channel,

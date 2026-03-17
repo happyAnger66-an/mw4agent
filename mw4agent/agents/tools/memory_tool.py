@@ -111,11 +111,15 @@ class MemorySearchTool(AgentTool):
                 files,
                 query[:80] if query else "",
             )
+            session_id = (context or {}).get("session_id")
+            agent_id = (context or {}).get("agent_id")
             raw = memory.search(
                 query,
                 workspace_dir,
                 max_results=max_results,
                 min_score=min_score,
+                session_id=str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None,
+                agent_id=str(agent_id).strip() if isinstance(agent_id, str) and agent_id.strip() else None,
             )
             results = [
                 {
@@ -197,6 +201,8 @@ class MemoryGetTool(AgentTool):
                 path,
                 from_line=from_line,
                 lines=lines,
+                session_id=str((context or {}).get("session_id") or "").strip() or None,
+                agent_id=str((context or {}).get("agent_id") or "").strip() or None,
             )
             return _json_result({
                 "path": r.path,

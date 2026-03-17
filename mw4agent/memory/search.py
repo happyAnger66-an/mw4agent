@@ -11,6 +11,11 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
+from ..agents.session.transcript import (
+    build_messages_from_leaf as build_session_messages_from_leaf,
+    resolve_session_transcript_path,
+)
+
 # 相对工作区的记忆/引导文件（与 OpenClaw VALID_BOOTSTRAP_NAMES 对齐）
 # 根下：AGENTS, SOUL, TOOLS, IDENTITY, USER, HEARTBEAT, BOOTSTRAP, MEMORY；以及 memory/*.md
 BOOTSTRAP_ROOT_FILES = (
@@ -116,6 +121,8 @@ def search(
     max_results: int = 10,
     min_score: float = 0.0,
     session_key: Optional[str] = None,
+    session_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> List[MemorySearchResult]:
     """Keyword search over MEMORY.md + memory/*.md. Returns hits with path, lines, snippet, score.
 
@@ -129,6 +136,37 @@ def search(
         return results
 
     pattern = re.compile("|".join(re.escape(w) for w in words), re.IGNORECASE)
+
+    # Search current session transcript (short-term memory) when session_id is provided.
+    if session_id:
+        try:
+            transcript_file = resolve_session_transcript_path(agent_id=agent_id, session_id=session_id)
+            session_msgs = build_session_messages_from_leaf(transcript_file=transcript_file)
+            for i, msg in enumerate(session_msgs):
+                if not isinstance(msg, dict):
+                    continue
+                role = str(msg.get("role") or "").strip() or "unknown"
+                content = msg.get("content")
+                text = str(content) if content is not None else ""
+                if not text:
+                    continue
+                if pattern.search(text):
+                    results.append(
+                        MemorySearchResult(
+                            path=f"sessions/{session_id}.jsonl",
+                            start_line=i + 1,
+                            end_line=i + 1,
+                            score=1.0,
+                            snippet=f"[{role}] {text.strip()[:500]}",
+                            source="sessions",
+                        )
+                    )
+                    if len(results) >= max_results * 2:
+                        break
+        except Exception:
+            # Best-effort; session transcript may not exist yet.
+            pass
+
     for rel_path in list_memory_files(workspace_dir):
         abs_path = os.path.join(workspace_dir, rel_path)
         lines = _read_file_lines(abs_path)
@@ -161,12 +199,29 @@ def search(
     return out
 
 
+def _read_session_text(*, agent_id: Optional[str], session_id: str) -> str:
+    transcript_file = resolve_session_transcript_path(agent_id=agent_id, session_id=session_id)
+    msgs = build_session_messages_from_leaf(transcript_file=transcript_file)
+    lines: List[str] = []
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        role = str(m.get("role") or "").strip() or "unknown"
+        content = m.get("content")
+        text = str(content) if content is not None else ""
+        if text.strip():
+            lines.append(f"[{role}] {text}")
+    return "\n".join(lines)
+
+
 def read_file(
     workspace_dir: str,
     rel_path: str,
     *,
     from_line: Optional[int] = None,
     lines: Optional[int] = None,
+    session_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> MemoryReadResult:
     """Read a memory file by relative path (e.g. MEMORY.md, memory/foo.md). Optional from/lines slice."""
     workspace_dir = os.path.normpath(os.path.abspath(workspace_dir))
@@ -174,7 +229,26 @@ def read_file(
     if not rel_path:
         return MemoryReadResult(path=rel_path or "", text="", missing=True)
 
-    # only allow paths that are in the memory file set (MEMORY.md, memory.md, memory/*.md)
+    # sessions/<session_id>.jsonl is a readable virtual path for session transcript
+    if rel_path.startswith("sessions/") and rel_path.endswith(".jsonl"):
+        sid = rel_path[len("sessions/") : -len(".jsonl")].strip()
+        if not sid:
+            return MemoryReadResult(path=rel_path, text="", missing=True)
+        try:
+            text = _read_session_text(agent_id=agent_id, session_id=sid)
+        except Exception:
+            return MemoryReadResult(path=rel_path, text="", missing=True)
+        all_lines = text.splitlines()
+        start = 0
+        if from_line is not None and from_line >= 1:
+            start = min(from_line - 1, len(all_lines))
+        count = len(all_lines) - start
+        if lines is not None and lines >= 1:
+            count = min(lines, count)
+        selected = all_lines[start : start + count]
+        return MemoryReadResult(path=rel_path, text="\n".join(selected), missing=False)
+
+    # only allow paths that are in the memory file set (workspace md files)
     allowed = list_memory_files(workspace_dir)
     if rel_path not in allowed:
         return MemoryReadResult(path=rel_path, text="", missing=True)
