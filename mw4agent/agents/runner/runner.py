@@ -37,6 +37,15 @@ from ..tools.policy import resolve_tool_policy_config, filter_tools_by_policy
 from mw4agent.log import get_logger
 logger = get_logger(__name__)
 
+from ..session.transcript import (
+    append_messages as append_transcript_messages,
+    drop_trailing_orphan_user,
+    limit_history_user_turns,
+    read_messages as read_transcript_messages,
+    resolve_history_limit_turns,
+    resolve_session_transcript_path,
+)
+
 MAX_TOOL_ROUNDS = 16
 
 
@@ -312,6 +321,22 @@ class AgentRunner:
             from ...config import get_default_config_manager
 
             cfg_mgr = get_default_config_manager()
+            # --- Session short-term memory (transcript history) ----------------
+            transcript_file = resolve_session_transcript_path(
+                agent_id=params.agent_id, session_id=session_entry.session_id
+            )
+            history_messages = read_transcript_messages(transcript_file=transcript_file)
+            history_messages = drop_trailing_orphan_user(history_messages)
+            try:
+                root_cfg = cfg_mgr.read_config("mw4agent", default={})
+            except Exception:
+                root_cfg = {}
+            history_limit = resolve_history_limit_turns(
+                cfg=root_cfg if isinstance(root_cfg, dict) else {},
+                session_key=params.session_key,
+            )
+            history_messages = limit_history_user_turns(history_messages, history_limit)
+
             base_policy = resolve_tool_policy_config(cfg_mgr)
             effective_policy = resolve_effective_policy_for_context(
                 cfg_mgr,
@@ -354,11 +379,33 @@ class AgentRunner:
                     tool_definitions,
                     tool_context,
                     run_id,
+                    history_messages=history_messages,
+                    transcript_file=transcript_file,
+                    transcript_session_id=session_entry.session_id,
+                    transcript_cwd=tool_context.get("workspace_dir") or "",
                 )
             else:
                 await asyncio.sleep(0)
+                messages: List[Dict[str, Any]] = []
+                if params_for_llm.extra_system_prompt:
+                    messages.append(
+                        {"role": "system", "content": params_for_llm.extra_system_prompt.strip()}
+                    )
+                messages.extend(history_messages)
+                user_msg = {"role": "user", "content": params_for_llm.message or ""}
+                messages.append(user_msg)
+
                 reply_text, provider, model, usage = generate_reply(
-                    params_for_llm)
+                    params_for_llm, messages=messages
+                )
+
+                # Persist transcript: user + assistant.
+                append_transcript_messages(
+                    transcript_file=transcript_file,
+                    session_id=session_entry.session_id,
+                    cwd=tool_context.get("workspace_dir") or "",
+                    messages=[user_msg, {"role": "assistant", "content": reply_text or ""}],
+                )
 
         # Emit assistant event(s): optionally reasoning then text (ReasoningLevel).
         reasoning_level = (
@@ -436,6 +483,11 @@ class AgentRunner:
         tool_definitions: List[Dict[str, Any]],
         tool_context: Dict[str, Any],
         run_id: str,
+        *,
+        history_messages: Optional[List[Dict[str, Any]]] = None,
+        transcript_file: Optional[str] = None,
+        transcript_session_id: Optional[str] = None,
+        transcript_cwd: str = "",
     ) -> tuple:
         # Returns (reply_text: str, provider: str, model: str, usage: LLMUsage)
         """Run LLM with tools in a loop until no tool_calls or max rounds. Returns (reply_text, provider, model, usage)."""
@@ -445,7 +497,17 @@ class AgentRunner:
                 "role": "system",
                 "content": params.extra_system_prompt.strip(),
             })
-        messages.append({"role": "user", "content": params.message or ""})
+        if history_messages:
+            messages.extend(history_messages)
+        user_msg = {"role": "user", "content": params.message or ""}
+        messages.append(user_msg)
+        if transcript_file and transcript_session_id:
+            append_transcript_messages(
+                transcript_file=transcript_file,
+                session_id=transcript_session_id,
+                cwd=transcript_cwd,
+                messages=[user_msg],
+            )
 
         reply_text = ""
         provider = "echo"
@@ -458,6 +520,13 @@ class AgentRunner:
             )
             if not tool_calls:
                 reply_text = content or ""
+                if transcript_file and transcript_session_id:
+                    append_transcript_messages(
+                        transcript_file=transcript_file,
+                        session_id=transcript_session_id,
+                        cwd=transcript_cwd,
+                        messages=[{"role": "assistant", "content": reply_text}],
+                    )
                 break
             logger.info(
                 "executing %d tool call(s): %s",
@@ -481,6 +550,13 @@ class AgentRunner:
                 ],
             }
             messages.append(assistant_msg)
+            if transcript_file and transcript_session_id:
+                append_transcript_messages(
+                    transcript_file=transcript_file,
+                    session_id=transcript_session_id,
+                    cwd=transcript_cwd,
+                    messages=[assistant_msg],
+                )
             for tc in tool_calls:
                 tid, name, args = tc["id"], tc["name"], tc["arguments"]
                 try:
@@ -509,6 +585,13 @@ class AgentRunner:
                     "tool_call_id": tid,
                     "content": result_str,
                 })
+                if transcript_file and transcript_session_id:
+                    append_transcript_messages(
+                        transcript_file=transcript_file,
+                        session_id=transcript_session_id,
+                        cwd=transcript_cwd,
+                        messages=[{"role": "tool", "tool_call_id": tid, "content": result_str}],
+                    )
         return (reply_text, provider, model, usage)
 
     async def execute_tool(

@@ -88,6 +88,7 @@ def _load_llm_config() -> Dict[str, Any]:
 def _call_openai_chat(
     prompt: str,
     *,
+    messages: Optional[List[Dict[str, Any]]] = None,
     model: str,
     api_key: str,
     base_url: str,
@@ -104,13 +105,13 @@ def _call_openai_chat(
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
     }
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,
-    }
+    resolved_messages: List[Dict[str, Any]]
+    if messages and isinstance(messages, list) and len(messages) > 0:
+        resolved_messages = messages
+    else:
+        resolved_messages = [{"role": "user", "content": prompt}]
+
+    body = {"model": model, "messages": resolved_messages, "temperature": 0.2}
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url=url, data=data, method="POST", headers=headers)
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:
@@ -302,7 +303,7 @@ def generate_reply_with_tools(
         return fallback, [], provider, model, LLMUsage()
 
 
-def generate_reply(params: AgentRunParams) -> Tuple[str, str, str, LLMUsage]:
+def generate_reply(params: AgentRunParams, *, messages: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, str, str, LLMUsage]:
     """Generate a reply for a single turn.
 
     Returns:
@@ -368,6 +369,7 @@ def generate_reply(params: AgentRunParams) -> Tuple[str, str, str, LLMUsage]:
     try:
         text, usage = _call_openai_chat(
             prompt,
+            messages=messages,
             model=model or spec.default_model or "gpt-4o-mini",
             api_key=api_key or "none",
             base_url=base_url,
