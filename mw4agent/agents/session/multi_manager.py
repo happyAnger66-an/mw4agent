@@ -51,6 +51,15 @@ class MultiAgentSessionManager:
         # mw4agent can add cross-agent listing later).
         return self._for_agent(agent_id).list_sessions(agent_id=agent_id)
 
+    def find_latest_by_session_key(self, session_key: str, *, agent_id: Optional[str] = None) -> Optional[SessionEntry]:
+        return self._for_agent(agent_id).find_latest_by_session_key(session_key)
+
     def delete_session(self, session_id: str, *, agent_id: Optional[str] = None) -> bool:
         return self._for_agent(agent_id).delete_session(session_id)
+
+    def resolve_transcript_path(self, session_id: str, *, agent_id: Optional[str] = None) -> str:
+        """Resolve per-agent transcript path for this session store."""
+        from .transcript import resolve_session_transcript_path
+
+        return resolve_session_transcript_path(agent_id=agent_id, session_id=session_id)
 

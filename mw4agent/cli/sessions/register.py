@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 import click
 
 from ...agents.agent_manager import AgentManager
-from ...agents.session import MultiAgentSessionManager, resolve_session_transcript_path
+from ...agents.session import MultiAgentSessionManager
 
 
 def _fmt_ts_ms(ts_ms: int) -> str:
@@ -37,6 +37,10 @@ def register_sessions_cli(program: click.Group, _ctx) -> None:
 
         rows: list[Dict[str, Any]] = []
         for s in sessions:
+            try:
+                transcript_file = session_mgr.resolve_transcript_path(s.session_id, agent_id=s.agent_id)  # type: ignore[arg-type]
+            except Exception:
+                transcript_file = ""
             rows.append(
                 {
                     "agentId": s.agent_id or agent_id,
@@ -46,9 +50,7 @@ def register_sessions_cli(program: click.Group, _ctx) -> None:
                     "updatedAt": s.updated_at,
                     "messageCount": s.message_count,
                     "totalTokens": s.total_tokens,
-                    "transcriptFile": resolve_session_transcript_path(
-                        agent_id=s.agent_id or agent_id, session_id=s.session_id
-                    ),
+                    "transcriptFile": transcript_file,
                 }
             )
 

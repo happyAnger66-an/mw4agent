@@ -48,7 +48,6 @@ from ..session.transcript import (
     limit_history_user_turns,
     read_messages as read_transcript_messages,
     resolve_history_limit_turns,
-    resolve_session_transcript_path,
     split_by_user_turns,
 )
 
@@ -342,7 +341,7 @@ class AgentRunner:
         except Exception:
             tool_plan = None
 
-        logger.info(f"agent_turn {tool_plan}")
+#        logger.info(f"agent_turn {tool_plan}")
         if tool_plan is not None:
             tool_name = str(tool_plan["tool_name"])
             tool_args = tool_plan.get("tool_args") or {}
@@ -418,9 +417,17 @@ class AgentRunner:
 
             cfg_mgr = get_default_config_manager()
             # --- Session short-term memory (transcript history) ----------------
-            transcript_file = resolve_session_transcript_path(
-                agent_id=params.agent_id, session_id=session_entry.session_id
-            )
+            # Resolve transcript path from session store to keep store+transcripts colocated.
+            # - MultiAgentSessionManager: ~/.mw4agent/agents/<agentId>/sessions/<sessionId>.jsonl
+            # - SessionManager (--session-file): <dir(session_file)>/<sessionId>.jsonl
+            try:
+                transcript_file = self.session_manager.resolve_transcript_path(  # type: ignore[attr-defined]
+                    session_entry.session_id, agent_id=params.agent_id
+                )
+            except TypeError:
+                transcript_file = self.session_manager.resolve_transcript_path(  # type: ignore[attr-defined]
+                    session_entry.session_id
+                )
             # Prefer leaf-based reconstruction so branch/resetLeaf is respected.
             history_messages = build_messages_from_leaf(transcript_file=transcript_file)
             # If transcript leaf ends with an orphan user message (crash/interruption),
@@ -488,8 +495,8 @@ class AgentRunner:
                 "tools_fs_workspace_only": fs_policy.workspace_only,
             }
             use_tool_loop = bool(tool_definitions)
-            logger.info(
-                f"agent_turn use_tool_loop: {use_tool_loop}, tool_definitions: {tool_definitions}")
+#            logger.info(
+#                f"agent_turn use_tool_loop: {use_tool_loop}, tool_definitions: {tool_definitions}")
             if use_tool_loop:
                 reply_text, provider, model, usage = await self._run_tool_loop(
                     params_for_llm,
@@ -552,6 +559,7 @@ class AgentRunner:
             )
         )
 
+        logger.info(f"agent_turn session_id: {session_entry.session_id}") 
         # Update session metadata.
         try:
             # Multi-agent session managers may require agent scoping for updates.

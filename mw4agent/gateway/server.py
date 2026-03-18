@@ -38,6 +38,19 @@ logger = get_logger(__name__)
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
+def _parse_reset_command(message: str) -> tuple[bool, str]:
+    """Return (reset_triggered, remaining_message)."""
+    raw = (message or "").strip()
+    if not raw:
+        return (False, "")
+    lowered = raw.lower()
+    for cmd in ("/reset", "/new"):
+        if lowered == cmd:
+            return (True, "")
+        if lowered.startswith(cmd + " "):
+            return (True, raw[len(cmd) :].strip())
+    return (False, raw)
+
 def _is_safe_rel_path(path: str) -> bool:
     # Minimal safety guard for the demo ls RPC:
     # - disallow absolute paths
@@ -377,13 +390,33 @@ def create_app(
             )
 
         if method == "agent":
-            message = str(params.get("message") or "").strip()
+            message_raw = str(params.get("message") or "")
             session_key = str(params.get("sessionKey") or "main").strip() or "main"
-            session_id = str(params.get("sessionId") or "main").strip() or "main"
             agent_id = str(params.get("agentId") or "main").strip() or "main"
             idem = str(params.get("idempotencyKey") or "").strip()
-            if not message or not idem:
-                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "message and idempotencyKey required"}}
+            if not idem:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "idempotencyKey required"}}
+
+            reset_triggered, message = _parse_reset_command(message_raw)
+
+            # Resolve sessionId:
+            # - If reset triggered: always mint a new sessionId (OpenClaw-style).
+            # - Else: prefer explicit sessionId param if provided; otherwise reuse latest session for sessionKey.
+            provided_session_id = str(params.get("sessionId") or "").strip()
+            session_id = provided_session_id
+            if reset_triggered or not session_id:
+                latest = None
+                try:
+                    latest = session_manager.find_latest_by_session_key(session_key, agent_id=agent_id)  # type: ignore[attr-defined]
+                except Exception:
+                    latest = None
+                if reset_triggered or not latest:
+                    session_id = str(uuid.uuid4())
+                else:
+                    session_id = str(latest.session_id)
+
+            if not message and not reset_triggered:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "message required"}}
 
             cached = state.get_dedupe(f"agent:{idem}")
             if cached:
@@ -392,7 +425,13 @@ def create_app(
             run_id = str(params.get("runId") or state.new_run_id())
             state.ensure_run(run_id=run_id, session_key=session_key)
 
-            accepted = {"runId": run_id, "status": "accepted", "acceptedAt": _now_ms()}
+            accepted = {
+                "runId": run_id,
+                "status": "accepted",
+                "acceptedAt": _now_ms(),
+                "sessionId": session_id,
+                "reset": reset_triggered,
+            }
             state.set_dedupe(f"agent:{idem}", DedupeEntry(ts_ms=_now_ms(), ok=True, payload=accepted))
 
             async def _run() -> None:
@@ -404,6 +443,27 @@ def create_app(
                     extra_system_prompt = (
                         f"{bootstrap}\n\n{extra}".strip() if bootstrap else (extra or None)
                     )
+                    # If this was a pure reset (no remaining user message), just create the new session entry and exit.
+                    if reset_triggered and not message:
+                        try:
+                            session_manager.get_or_create_session(  # type: ignore[attr-defined]
+                                session_id=session_id,
+                                session_key=session_key,
+                                agent_id=agent_id,
+                            )
+                        except Exception:
+                            pass
+                        final_payload = {
+                            "runId": run_id,
+                            "status": "ok",
+                            "summary": "reset",
+                            "sessionId": session_id,
+                        }
+                        state.set_dedupe(
+                            f"agent:{idem}", DedupeEntry(ts_ms=_now_ms(), ok=True, payload=final_payload)
+                        )
+                        return
+
                     result = await runner.run(
                         AgentRunParams(
                             message=message,
@@ -419,11 +479,19 @@ def create_app(
                             workspace_dir=workspace_dir,
                         )
                     )
-                    final_payload = {"runId": run_id, "status": "ok", "summary": "completed", "result": {"meta": asdict(result.meta)}}
-                    state.set_dedupe(f"agent:{idem}", DedupeEntry(ts_ms=_now_ms(), ok=True, payload=final_payload))
+                    final_payload = {
+                        "runId": run_id,
+                        "status": "ok",
+                        "summary": "completed",
+                        "sessionId": session_id,
+                        "result": {"meta": asdict(result.meta)},
+                    }
+                    state.set_dedupe(
+                        f"agent:{idem}", DedupeEntry(ts_ms=_now_ms(), ok=True, payload=final_payload)
+                    )
                 except Exception as e:
                     err = {"code": "unavailable", "message": str(e)}
-                    final_payload = {"runId": run_id, "status": "error", "summary": str(e)}
+                    final_payload = {"runId": run_id, "status": "error", "summary": str(e), "sessionId": session_id}
                     state.set_dedupe(f"agent:{idem}", DedupeEntry(ts_ms=_now_ms(), ok=False, payload=final_payload, error=err))
 
             asyncio.create_task(_run())

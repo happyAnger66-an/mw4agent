@@ -41,6 +41,27 @@ def test_transcript_roundtrip_and_limit(monkeypatch, tmp_path: Path) -> None:
     assert [m.get("content") for m in limited] == ["u2", "a2"]
 
 
+def test_session_entry_normalizes_updated_at(monkeypatch) -> None:
+    # Force deterministic "now".
+    import mw4agent.agents.session.manager as mod
+
+    monkeypatch.setattr(mod.time, "time", lambda: 1730000000.0)  # seconds
+    from mw4agent.agents.session.manager import SessionEntry
+
+    # Legacy tiny placeholder should be treated as invalid and replaced with now_ms.
+    e1 = SessionEntry(session_id="s1", session_key="k1", created_at=1, updated_at=2)
+    assert e1.updated_at >= 1_000_000_000_000
+
+    # Epoch seconds should be converted to ms.
+    e2 = SessionEntry(
+        session_id="s2",
+        session_key="k2",
+        created_at=1730000000,
+        updated_at=1730000001,
+    )
+    assert e2.updated_at == 1730000001 * 1000
+
+
 def test_transcript_leaf_chain_and_branch(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("MW4AGENT_STATE_DIR", str(tmp_path / ".mw4agent"))
     session_id = "sess_002"
@@ -79,4 +100,14 @@ def test_transcript_leaf_chain_and_branch(monkeypatch, tmp_path: Path) -> None:
     branch_to_parent(transcript_file=transcript, parent_id=comp_parent)
     chain3 = build_messages_from_leaf(transcript_file=transcript)
     assert chain3 == chain_branch
+
+
+def test_single_store_transcript_is_colocated(tmp_path: Path) -> None:
+    from mw4agent.agents.session.manager import SessionManager
+
+    store = tmp_path / "sessions.json"
+    mgr = SessionManager(str(store))
+    p = mgr.resolve_transcript_path("sess_001")
+    assert p.endswith("sess_001.jsonl")
+    assert str(tmp_path) in p
 

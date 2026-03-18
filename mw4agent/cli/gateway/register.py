@@ -21,7 +21,12 @@ def register_gateway_cli(program: click.Group, ctx: ProgramContext) -> None:
     @click.option("--bind", default="127.0.0.1", help="Bind address")
     @click.option("--force", is_flag=True, help="Kill existing gateway on port")
     @click.option("--dev", is_flag=True, help="Dev profile")
-    @click.option("--session-file", default="mw4agent.sessions.json", show_default=True, help="Session store file")
+    @click.option(
+        "--session-file",
+        default="",
+        show_default=False,
+        help="Optional session store file (omit to use per-agent stores under ~/.mw4agent/agents/<agentId>/sessions/)",
+    )
     @click.option("--node-token", help="Token required for node connections (or set GATEWAY_NODE_TOKEN); omit to allow unauthenticated nodes (dev)")
     @click.pass_context
     def gateway_run(ctx: click.Context, port: int, bind: str, force: bool, dev: bool, session_file: str, node_token: Optional[str]):
@@ -41,7 +46,7 @@ def register_gateway_cli(program: click.Group, ctx: ProgramContext) -> None:
         except Exception as e:
             raise click.ClickException(f"uvicorn not available: {e}")
 
-        app = create_app(session_file=session_file, node_token=node_token)
+        app = create_app(session_file=session_file.strip(), node_token=node_token)
         uvicorn.run(app, host=bind, port=port, log_level="info")
 
     @gateway.command("status", help="Show gateway service status + probe the Gateway")

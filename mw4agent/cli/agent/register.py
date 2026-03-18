@@ -57,7 +57,7 @@ def register_agent_cli(program: click.Group, ctx: ProgramContext) -> None:
     @click.option("-m", "--message", required=True, help="User message to send to the agent")
     @click.option("--url", help="Gateway base URL (http://host:port)")
     @click.option("--session-key", default="cli:default", show_default=True, help="Session key")
-    @click.option("--session-id", default="cli-default", show_default=True, help="Session id")
+    @click.option("--session-id", default="", show_default=False, help="Session id (optional; omit to let gateway manage)")
     @click.option("--agent-id", default="main", show_default=True, help="Target agent id")
     @click.option(
         "--with-gateway-ls",
@@ -117,10 +117,11 @@ def register_agent_cli(program: click.Group, ctx: ProgramContext) -> None:
         agent_params = {
             "message": message,
             "sessionKey": session_key,
-            "sessionId": session_id,
             "agentId": agent_id.strip() or "main",
             "idempotencyKey": idem,
         }
+        if session_id.strip():
+            agent_params["sessionId"] = session_id.strip()
         if extra_system_prompt:
             agent_params["extraSystemPrompt"] = extra_system_prompt
 
