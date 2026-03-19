@@ -9,6 +9,7 @@ with embeddings / hybrid search without changing tools.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -18,7 +19,7 @@ from .search import (
     search as file_search_search,
     read_file as file_search_read_file,
 )
-from .index import index_files, search_index
+from .index import index_files, search_index, upsert_chunk
 from ..config.root import read_root_section
 from ..config.paths import resolve_agent_dir
 
@@ -44,7 +45,7 @@ class MemoryBackend:
         workspace_dir: str,
         *,
         options: SearchOptions,
-    ) -> List[file_search.MemorySearchResult]:
+    ) -> List[MemorySearchResult]:
         raise NotImplementedError
 
     def read_file(
@@ -56,7 +57,7 @@ class MemoryBackend:
         lines: Optional[int] = None,
         session_id: Optional[str] = None,
         agent_id: Optional[str] = None,
-    ) -> file_search.MemoryReadResult:
+    ) -> MemoryReadResult:
         raise NotImplementedError
 
     def sync(self, *, reason: str = "manual") -> None:
@@ -66,6 +67,7 @@ class MemoryBackend:
     def note_session_delta(
         self,
         *,
+        agent_id: Optional[str] = None,
         session_id: str,
         bytes_delta: int = 0,
         messages_delta: int = 0,
@@ -130,6 +132,7 @@ class LocalIndexBackend(MemoryBackend):
     def __init__(self, *, memory_cfg: Dict[str, Any]) -> None:
         self._memory_cfg = memory_cfg if isinstance(memory_cfg, dict) else {}
         self._indexed_workspaces: set[tuple[str, str]] = set()  # (agent_id, workspace_dir)
+        self._indexed_session_mtime: Dict[tuple[str, str], float] = {}  # (agent_id, session_id) -> mtime
 
     def _db_path_for(self, agent_id: Optional[str]) -> str:
         aid = (agent_id or "").strip().lower() or "main"
@@ -144,6 +147,63 @@ class LocalIndexBackend(MemoryBackend):
             self._indexed_workspaces.add(key)
         return db_path
 
+    def _ensure_session_index(
+        self,
+        *,
+        db_path: str,
+        agent_id: Optional[str],
+        session_id: Optional[str],
+    ) -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        # Phase 2: index the transcript (leaf chain) as one synthetic chunk.
+        try:
+            from ..agents.session.transcript import build_messages_from_leaf, resolve_session_transcript_path
+        except Exception:
+            return
+        transcript_file = resolve_session_transcript_path(agent_id=agent_id, session_id=sid)
+        try:
+            mtime = os.path.getmtime(transcript_file)
+        except OSError:
+            return
+        aid = (agent_id or "").strip().lower() or "main"
+        k = (aid, sid)
+        if self._indexed_session_mtime.get(k) == mtime:
+            return
+        msgs = build_messages_from_leaf(transcript_file=transcript_file, limit=200)
+        parts: List[str] = []
+        for m in msgs:
+            if not isinstance(m, dict):
+                continue
+            role = str(m.get("role") or "").strip()
+            if role not in ("user", "assistant", "system"):
+                continue
+            content = m.get("content")
+            if isinstance(content, str) and content.strip():
+                parts.append(f"{role}: {content.strip()}")
+        if not parts:
+            return
+        blob = "\n".join(parts)
+        path = f"sessions/{sid}.jsonl"
+        upsert_chunk(db_path=db_path, source="session", path=path, content=blob)
+        self._indexed_session_mtime[k] = mtime
+
+    def note_session_delta(
+        self,
+        *,
+        agent_id: Optional[str] = None,
+        session_id: str,
+        bytes_delta: int = 0,
+        messages_delta: int = 0,
+    ) -> None:
+        # Update the session transcript chunk eagerly (called right after transcript append).
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        db_path = self._db_path_for(agent_id)
+        self._ensure_session_index(db_path=db_path, agent_id=agent_id, session_id=sid)
+
     def search(
         self,
         query: str,
@@ -152,11 +212,14 @@ class LocalIndexBackend(MemoryBackend):
         options: SearchOptions,
     ) -> List[MemorySearchResult]:
         db_path = self._ensure_index(agent_id=options.agent_id, workspace_dir=workspace_dir)
+        if options.session_id:
+            self._ensure_session_index(db_path=db_path, agent_id=options.agent_id, session_id=options.session_id)
         rows = search_index(
             db_path=db_path,
             query=query,
             max_results=options.max_results,
             min_score=options.min_score,
+            sources=("memory", "session") if options.session_id else ("memory",),
         )
         out: List[MemorySearchResult] = []
         for row in rows:

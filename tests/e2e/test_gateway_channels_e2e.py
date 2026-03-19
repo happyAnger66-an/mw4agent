@@ -74,6 +74,14 @@ def gateway_process(tmp_path: Path):
     port = _find_free_port()
     base_url = f"http://127.0.0.1:{port}"
     session_file = str(tmp_path / "gateway.sessions.json")
+    # Isolate gateway subprocess from developer machine config/state.
+    state_dir = tmp_path / ".mw4agent"
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "mw4agent.json").write_text(
+        json.dumps({"llm": {"provider": "echo", "model_id": "echo"}}),
+        encoding="utf-8",
+    )
 
     cmd = [
         sys.executable,
@@ -94,7 +102,11 @@ def gateway_process(tmp_path: Path):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        env=dict(os.environ),
+        env={
+            **dict(os.environ),
+            "MW4AGENT_STATE_DIR": str(state_dir),
+            "MW4AGENT_CONFIG_DIR": str(cfg_dir),
+        },
     )
 
     try:

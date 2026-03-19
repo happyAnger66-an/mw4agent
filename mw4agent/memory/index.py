@@ -14,7 +14,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 BOOTSTRAP_ROOT_FILES = (
     "AGENTS.md",
@@ -64,6 +64,7 @@ def _open_db(path: str) -> sqlite3.Connection:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source)")
     conn.commit()
     return conn
 
@@ -152,12 +153,44 @@ def index_files(
         conn.close()
 
 
+def upsert_chunk(
+    *,
+    db_path: str,
+    source: str,
+    path: str,
+    content: str,
+    updated_at_ms: Optional[int] = None,
+) -> None:
+    """Upsert a single chunk by (source, path).
+
+    Schema stays minimal; emulate upsert via delete+insert.
+    """
+    source = str(source or "").strip() or "memory"
+    path = str(path or "").strip()
+    if not path:
+        return
+    content = str(content or "")
+    now = int(updated_at_ms or _now_ms())
+    conn = _open_db(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM chunks WHERE source = ? AND path = ?", (source, path))
+        cur.execute(
+            "INSERT INTO chunks (source, path, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (source, path, content, now, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def search_index(
     *,
     db_path: str,
     query: str,
     max_results: int = 10,
     min_score: float = 0.0,
+    sources: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Search the index using simple LIKE-based matching over content.
 
@@ -179,7 +212,13 @@ def search_index(
             clauses.append("content LIKE ?")
             params.append(f"%{w}%")
         where = " OR ".join(clauses)
-        sql = f"SELECT id, source, path, content, created_at, updated_at FROM chunks WHERE ({where}) LIMIT ?"
+        extra = ""
+        if sources:
+            srcs = [str(s).strip() for s in sources if str(s).strip()]
+            if srcs:
+                extra = " AND source IN (" + ",".join(["?"] * len(srcs)) + ")"
+                params.extend(srcs)
+        sql = f"SELECT id, source, path, content, created_at, updated_at FROM chunks WHERE ({where}){extra} LIMIT ?"
         params.append(str(max_results * 2))
         cur.execute(sql, params)
         rows = cur.fetchall()
@@ -205,6 +244,6 @@ def search_index(
             break
 
     if min_score > 0.0:
-        results = [r for r in results if r.score >= min_score]
+        results = [r for r in results if float(r.get("score") or 0.0) >= float(min_score)]
     return results
 

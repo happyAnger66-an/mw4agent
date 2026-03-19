@@ -30,6 +30,7 @@ from ..queue.manager import CommandQueue
 from ..events.stream import EventStream
 from ...config.paths import get_default_workspace_dir
 from ...llm import generate_reply, generate_reply_with_tools, LLMUsage
+from ...memory.backend import get_memory_backend
 from ..reasoning import split_reasoning_and_text
 from ..skills.snapshot import build_skill_snapshot
 from ..tools.policy import resolve_tool_policy_config, filter_tools_by_policy
@@ -637,6 +638,14 @@ class AgentRunner:
                 cwd=transcript_cwd,
                 messages=[user_msg],
             )
+            try:
+                get_memory_backend().note_session_delta(
+                    agent_id=tool_context.get("agent_id"),
+                    session_id=transcript_session_id,
+                    messages_delta=1,
+                )
+            except Exception:
+                pass
 
         reply_text = ""
         provider = "echo"
@@ -656,6 +665,14 @@ class AgentRunner:
                         cwd=transcript_cwd,
                         messages=[{"role": "assistant", "content": reply_text}],
                     )
+                    try:
+                        get_memory_backend().note_session_delta(
+                            agent_id=tool_context.get("agent_id"),
+                            session_id=transcript_session_id,
+                            messages_delta=1,
+                        )
+                    except Exception:
+                        pass
                 break
             logger.info(
                 "executing %d tool call(s): %s",
@@ -686,6 +703,14 @@ class AgentRunner:
                     cwd=transcript_cwd,
                     messages=[assistant_msg],
                 )
+                try:
+                    get_memory_backend().note_session_delta(
+                        agent_id=tool_context.get("agent_id"),
+                        session_id=transcript_session_id,
+                        messages_delta=1,
+                    )
+                except Exception:
+                    pass
             for tc in tool_calls:
                 tid, name, args = tc["id"], tc["name"], tc["arguments"]
                 try:
@@ -721,6 +746,14 @@ class AgentRunner:
                         cwd=transcript_cwd,
                         messages=[{"role": "tool", "tool_call_id": tid, "content": result_str}],
                     )
+                    try:
+                        get_memory_backend().note_session_delta(
+                            agent_id=tool_context.get("agent_id"),
+                            session_id=transcript_session_id,
+                            messages_delta=1,
+                        )
+                    except Exception:
+                        pass
         return (reply_text, provider, model, usage)
 
     async def execute_tool(

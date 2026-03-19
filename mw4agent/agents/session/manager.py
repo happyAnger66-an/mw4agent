@@ -173,7 +173,13 @@ class SessionManager:
         for entry in self.sessions.values():
             if entry.session_key != key:
                 continue
-            if best is None or (entry.updated_at or 0) > (best.updated_at or 0):
+            if best is None:
+                best = entry
+                continue
+            # Tie-break deterministically: updated_at -> created_at -> session_id.
+            a = (int(entry.updated_at or 0), int(entry.created_at or 0), str(entry.session_id or ""))
+            b = (int(best.updated_at or 0), int(best.created_at or 0), str(best.session_id or ""))
+            if a > b:
                 best = entry
         return best
 
