@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .search import (
     MemorySearchResult,
@@ -121,23 +121,42 @@ class StubMemoryBackend(MemoryBackend):
 
 
 class LocalIndexBackend(MemoryBackend):
-    """Phase 1 backend: SQLite index over workspace files (memory source only).
+    """SQLite MemoryIndex: file memory + optional session transcript chunk (Phase 1–2).
 
-    This backend is intentionally minimal:
-    - It only indexes MEMORY.md + memory/*.md (source='memory').
-    - It uses LIKE-based search over the stored content.
-    - It rebuilds the 'memory' portion of the index on first use.
+    - Indexes MEMORY.md + memory/*.md (source='memory').
+    - Session: one synthetic chunk per session (source='session', path sessions/<id>.jsonl).
+    - LIKE-based search; no embeddings yet.
     """
 
     def __init__(self, *, memory_cfg: Dict[str, Any]) -> None:
         self._memory_cfg = memory_cfg if isinstance(memory_cfg, dict) else {}
         self._indexed_workspaces: set[tuple[str, str]] = set()  # (agent_id, workspace_dir)
         self._indexed_session_mtime: Dict[tuple[str, str], float] = {}  # (agent_id, session_id) -> mtime
+        # Accumulated deltas for memory.sync.sessions thresholds (Phase 2).
+        self._delta_acc: Dict[tuple[str, str], Dict[str, int]] = {}
 
     def _db_path_for(self, agent_id: Optional[str]) -> str:
         aid = (agent_id or "").strip().lower() or "main"
         agent_dir = resolve_agent_dir(aid)
         return str(Path(agent_dir) / "memory" / "index.sqlite")
+
+    def _session_sync_thresholds(self) -> Tuple[int, int]:
+        """Return (delta_bytes, delta_messages). Both 0 => sync on every note (default)."""
+        sync = self._memory_cfg.get("sync")
+        if not isinstance(sync, dict):
+            return (0, 0)
+        sess = sync.get("sessions")
+        if not isinstance(sess, dict):
+            return (0, 0)
+        try:
+            db = int(sess["deltaBytes"]) if sess.get("deltaBytes") is not None else 0
+        except (TypeError, ValueError):
+            db = 0
+        try:
+            dm = int(sess["deltaMessages"]) if sess.get("deltaMessages") is not None else 0
+        except (TypeError, ValueError):
+            dm = 0
+        return (max(0, db), max(0, dm))
 
     def _ensure_index(self, *, agent_id: Optional[str], workspace_dir: str) -> str:
         key = ((agent_id or "").strip().lower() or "main", str(Path(workspace_dir).resolve()))
@@ -197,11 +216,26 @@ class LocalIndexBackend(MemoryBackend):
         bytes_delta: int = 0,
         messages_delta: int = 0,
     ) -> None:
-        # Update the session transcript chunk eagerly (called right after transcript append).
+        """Refresh session chunk in the index (eager or after sync.sessions thresholds)."""
         sid = (session_id or "").strip()
         if not sid:
             return
         db_path = self._db_path_for(agent_id)
+        aid = (agent_id or "").strip().lower() or "main"
+        key = (aid, sid)
+        db_th, dm_th = self._session_sync_thresholds()
+        if db_th <= 0 and dm_th <= 0:
+            self._ensure_session_index(db_path=db_path, agent_id=agent_id, session_id=sid)
+            return
+        acc = self._delta_acc.setdefault(key, {"bytes": 0, "messages": 0})
+        acc["bytes"] += max(0, int(bytes_delta))
+        acc["messages"] += max(0, int(messages_delta))
+        fire = (db_th > 0 and acc["bytes"] >= db_th) or (dm_th > 0 and acc["messages"] >= dm_th)
+        if not fire:
+            return
+        acc["bytes"] = 0
+        acc["messages"] = 0
+        self._indexed_session_mtime.pop(key, None)
         self._ensure_session_index(db_path=db_path, agent_id=agent_id, session_id=sid)
 
     def search(
@@ -223,6 +257,15 @@ class LocalIndexBackend(MemoryBackend):
         )
         out: List[MemorySearchResult] = []
         for row in rows:
+            raw_sid = row.get("session_id")
+            sess_id: Optional[str] = None
+            if isinstance(raw_sid, str) and raw_sid.strip():
+                sess_id = raw_sid.strip()
+            elif raw_sid is not None:
+                s2 = str(raw_sid).strip()
+                sess_id = s2 or None
+            cr = row.get("created_at")
+            up = row.get("updated_at")
             out.append(
                 MemorySearchResult(
                     path=str(row.get("path") or ""),
@@ -231,6 +274,9 @@ class LocalIndexBackend(MemoryBackend):
                     score=float(row.get("score") or 1.0),
                     snippet=str(row.get("snippet") or ""),
                     source=str(row.get("source") or "memory") or "memory",
+                    session_id=sess_id,
+                    created_at=int(cr) if cr is not None else None,
+                    updated_at=int(up) if up is not None else None,
                 )
             )
         return out
@@ -255,8 +301,24 @@ class LocalIndexBackend(MemoryBackend):
             agent_id=agent_id,
         )
 
+    def sync(self, *, reason: str = "manual") -> None:
+        """Invalidate in-memory index caches so the next search rebuilds from disk.
+
+        Does not require workspace_dir (per-interface); each workspace is re-indexed on demand.
+        """
+        _ = reason
+        self._indexed_workspaces.clear()
+        self._indexed_session_mtime.clear()
+        self._delta_acc.clear()
+
 
 _default_backend: Optional[MemoryBackend] = None
+
+
+def reset_memory_backend_singleton() -> None:
+    """Clear the process-wide MemoryBackend singleton (for tests and config reload)."""
+    global _default_backend
+    _default_backend = None
 
 
 def get_memory_backend() -> MemoryBackend:

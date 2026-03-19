@@ -11,11 +11,6 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
-from ..agents.session.transcript import (
-    build_messages_from_leaf as build_session_messages_from_leaf,
-    resolve_session_transcript_path,
-)
-
 # 相对工作区的记忆/引导文件（与 OpenClaw VALID_BOOTSTRAP_NAMES 对齐）
 # 根下：AGENTS, SOUL, TOOLS, IDENTITY, USER, HEARTBEAT, BOOTSTRAP, MEMORY；以及 memory/*.md
 BOOTSTRAP_ROOT_FILES = (
@@ -46,6 +41,16 @@ MEMORY_DIR = "memory"
 MEMORY_DIR_GLOB = "*.md"
 
 
+def _session_transcript_helpers():
+    """Lazy import to avoid circular imports (memory → agents → tools → memory.backend)."""
+    from ..agents.session.transcript import (
+        build_messages_from_leaf as build_session_messages_from_leaf,
+        resolve_session_transcript_path,
+    )
+
+    return resolve_session_transcript_path, build_session_messages_from_leaf
+
+
 @dataclass
 class MemorySearchResult:
     """Single search hit (align with OpenClaw MemorySearchResult)."""
@@ -54,7 +59,10 @@ class MemorySearchResult:
     end_line: int
     score: float
     snippet: str
-    source: str = "memory"  # "memory" | "sessions" when we add sessions
+    source: str = "memory"  # "memory" | "session" (indexed transcript blob)
+    session_id: Optional[str] = None  # set when source is session chunk
+    created_at: Optional[int] = None  # ms since epoch (index row)
+    updated_at: Optional[int] = None  # ms since epoch (index row)
 
 
 @dataclass
@@ -140,6 +148,7 @@ def search(
     # Search current session transcript (short-term memory) when session_id is provided.
     if session_id:
         try:
+            resolve_session_transcript_path, build_session_messages_from_leaf = _session_transcript_helpers()
             transcript_file = resolve_session_transcript_path(agent_id=agent_id, session_id=session_id)
             session_msgs = build_session_messages_from_leaf(transcript_file=transcript_file)
             for i, msg in enumerate(session_msgs):
@@ -200,6 +209,7 @@ def search(
 
 
 def _read_session_text(*, agent_id: Optional[str], session_id: str) -> str:
+    resolve_session_transcript_path, build_session_messages_from_leaf = _session_transcript_helpers()
     transcript_file = resolve_session_transcript_path(agent_id=agent_id, session_id=session_id)
     msgs = build_session_messages_from_leaf(transcript_file=transcript_file)
     lines: List[str] = []

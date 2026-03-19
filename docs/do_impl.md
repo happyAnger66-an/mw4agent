@@ -106,11 +106,36 @@
     - `backend = get_memory_backend()` → 断言为 `LocalIndexBackend`。
     - `backend.search("hello", str(ws), options=SearchOptions(...))`，断言结果中包含 `"MEMORY.md"`。
 - 全量回归：
-  - `pytest` 全通过（73 passed），说明：
+  - `pytest` 全通过，说明：
     - 当未设置 `memory.enabled` 时，行为与旧版完全一致；
     - 开启 `memory.enabled=true` 也不会破坏现有 E2E/单元测试逻辑。
 
 ---
 
-后续 Phase 2/3（会话增量同步 + embedding/hybrid 检索）将在该索引与 backend 基础上继续迭代，这里不再展开。  
-本文件后续也可按阶段追加实现记录，方便查阅具体 commit/文件位置。 
+## Phase 2：会话增量同步 + sessions 纳入索引（已完成）
+
+- **时间**：本次迭代补全（对齐 `docs/do_plan.md` Phase 2）。
+- **Transcript → MemoryIndex**（`mw4agent/agents/session/transcript.py`）：
+  - 在 `append_messages` / `append_compaction` / `append_custom` / `branch_to_parent` 写入结束后调用 `_notify_transcript_index_delta(...)`。
+  - 内部 **惰性** `get_memory_backend().note_session_delta(...)`，并据 transcript 路径推断 `agent_id`（`.../agents/<id>/sessions/...`）。
+  - **Runner**（`mw4agent/agents/runner/runner.py`）不再重复调用 `note_session_delta`，避免与 transcript 钩子双重触发。
+- **可配置节流**（`memory.sync.sessions`）：
+  - `LocalIndexBackend` 读取 `deltaBytes` / `deltaMessages`（非负整数）。
+  - **二者均为 0 或未配置**（默认）：每次 `note_session_delta` 都尝试刷新会话 chunk（与 Phase 2 前行为一致）。
+  - **任一大于 0**：累积增量，满足 **字节阈值或消息阈值** 之一时才刷新；未刷新时 **`memory_search` 仍会在带 `session_id` 的 search 路径上按文件 mtime 懒更新**，避免漏检。
+- **检索元数据**：
+  - `mw4agent/memory/index.py` 的 `search_index` 结果增加 `session_id`（由 `sessions/<sid>.jsonl` 解析）、`created_at` / `updated_at`（毫秒）。
+  - `MemorySearchResult`（`mw4agent/memory/search.py`）增加对应可选字段。
+  - `MemorySearchTool` JSON 增加可选 `sessionId` / `createdAt` / `updatedAt`（camelCase）。
+- **`LocalIndexBackend.sync`**：
+  - 清空已索引 workspace 集合、session mtime 缓存与 delta 累积表；下次 `search` 会按需重建文件侧索引。
+- **循环依赖修复**：
+  - `memory/search.py` 对 `transcript` 的引用改为 `_session_transcript_helpers()` 惰性导入，避免 `memory → agents → tools → memory.backend → memory.search` 初始化死锁。
+- **测试**（`tests/test_memory_index_backend.py`）：
+  - `autouse` fixture：`reset_memory_backend_singleton()`，避免单例污染。
+  - 覆盖：会话命中含 `session_id` 与时间戳、`search_index` 元数据、**高阈值下 eager 不写 session 行但 search 仍能命中**、`sync` 后 workspace 文件变更可被重新索引。
+
+---
+
+后续 Phase 3（Embedding + 混合检索 + MMR/时间衰减）将在该索引与 backend 基础上继续迭代。  
+本文件后续也可按阶段追加实现记录，方便查阅具体 commit/文件位置。

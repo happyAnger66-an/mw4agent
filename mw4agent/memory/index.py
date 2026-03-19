@@ -77,6 +77,17 @@ def _read_file_text(abs_path: str) -> Optional[str]:
         return None
 
 
+def _session_id_from_chunk_path(source: str, path: str) -> Optional[str]:
+    """Derive session id from synthetic path sessions/<id>.jsonl (Phase 2)."""
+    if str(source or "").strip() != "session":
+        return None
+    p = str(path or "")
+    prefix = "sessions/"
+    if p.startswith(prefix) and p.endswith(".jsonl"):
+        return p[len(prefix) : -len(".jsonl")] or None
+    return None
+
+
 def _normalize_query_local(query: str) -> List[str]:
     """Local copy of the keyword tokenizer used for LIKE-based search.
 
@@ -230,6 +241,7 @@ def search_index(
         text = str(content or "")
         # Very rough snippet: first 500 chars.
         snippet = text.strip()[:500]
+        src = str(source or "memory") or "memory"
         results.append(
             {
                 "path": str(path or ""),
@@ -237,7 +249,10 @@ def search_index(
                 "end_line": 1,
                 "score": 1.0,
                 "snippet": snippet,
-                "source": str(source or "memory") or "memory",
+                "source": src,
+                "session_id": _session_id_from_chunk_path(src, str(path or "")),
+                "created_at": int(created_at) if created_at is not None else None,
+                "updated_at": int(updated_at) if updated_at is not None else None,
             }
         )
         if len(results) >= max_results:

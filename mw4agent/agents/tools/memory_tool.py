@@ -128,8 +128,9 @@ class MemorySearchTool(AgentTool):
                 workspace_dir,
                 options=options,
             )
-            results = [
-                {
+            results = []
+            for r in raw:
+                item: Dict[str, Any] = {
                     "path": r.path,
                     "startLine": r.start_line,
                     "endLine": r.end_line,
@@ -137,8 +138,13 @@ class MemorySearchTool(AgentTool):
                     "snippet": r.snippet,
                     "source": r.source,
                 }
-                for r in raw
-            ]
+                if getattr(r, "session_id", None):
+                    item["sessionId"] = r.session_id
+                if getattr(r, "created_at", None) is not None:
+                    item["createdAt"] = r.created_at
+                if getattr(r, "updated_at", None) is not None:
+                    item["updatedAt"] = r.updated_at
+                results.append(item)
             return _json_result({
                 "results": results,
                 "provider": "file",

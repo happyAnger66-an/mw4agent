@@ -24,6 +24,42 @@ from ...config.paths import ensure_agent_dirs, normalize_agent_id, resolve_agent
 SAFE_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 
 
+def _infer_agent_id_from_transcript_path(transcript_file: str) -> Optional[str]:
+    """Parse .../agents/<agentId>/sessions/<sid>.jsonl → agentId."""
+    try:
+        parts = Path(transcript_file).resolve().parts
+        for i, p in enumerate(parts):
+            if p == "agents" and i + 1 < len(parts):
+                nxt = parts[i + 1]
+                if nxt and nxt != "sessions":
+                    return nxt
+    except Exception:
+        pass
+    return None
+
+
+def _notify_transcript_index_delta(
+    *,
+    transcript_file: str,
+    session_id: str,
+    bytes_delta: int,
+    messages_delta: int,
+) -> None:
+    """Tell MemoryBackend to refresh session chunk in MemoryIndex (Phase 2)."""
+    try:
+        from ...memory.backend import get_memory_backend
+
+        agent_id = _infer_agent_id_from_transcript_path(transcript_file)
+        get_memory_backend().note_session_delta(
+            agent_id=agent_id,
+            session_id=session_id,
+            bytes_delta=max(0, int(bytes_delta)),
+            messages_delta=max(0, int(messages_delta)),
+        )
+    except Exception:
+        pass
+
+
 def validate_session_id(session_id: str) -> str:
     sid = (session_id or "").strip()
     if not sid or not SAFE_SESSION_ID_RE.match(sid):
@@ -102,8 +138,18 @@ def branch_to_parent(*, transcript_file: str, parent_id: Optional[str]) -> None:
     path = Path(transcript_file)
     if not path.exists():
         return
+    start = path.stat().st_size
     with path.open("a", encoding="utf-8") as f:
         _append_leaf_pointer(f=f, leaf_id=parent_id)
+    end = path.stat().st_size
+    sid = path.stem if path.suffix == ".jsonl" else None
+    if sid:
+        _notify_transcript_index_delta(
+            transcript_file=str(path),
+            session_id=sid,
+            bytes_delta=max(0, end - start),
+            messages_delta=0,
+        )
 
 
 def append_compaction(
@@ -129,9 +175,17 @@ def append_compaction(
         "parentId": parent_id,
         "message": msg,
     }
+    start = path.stat().st_size if path.exists() else 0
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
         _append_leaf_pointer(f=f, leaf_id=eid)
+    end = path.stat().st_size
+    _notify_transcript_index_delta(
+        transcript_file=str(path),
+        session_id=session_id,
+        bytes_delta=max(0, end - start),
+        messages_delta=1,
+    )
     return eid
 
 
@@ -146,8 +200,16 @@ def append_custom(
     ensure_session_header(transcript_file=transcript_file, session_id=session_id, cwd=cwd)
     path = Path(transcript_file)
     record = {"type": "custom", "timestamp": _now_ms(), "data": data}
+    start = path.stat().st_size if path.exists() else 0
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    end = path.stat().st_size
+    _notify_transcript_index_delta(
+        transcript_file=str(path),
+        session_id=session_id,
+        bytes_delta=max(0, end - start),
+        messages_delta=0,
+    )
 
 
 def append_messages(
@@ -160,6 +222,8 @@ def append_messages(
     ensure_session_header(transcript_file=transcript_file, session_id=session_id, cwd=cwd)
     path = Path(transcript_file)
     parent_id = _scan_leaf_id(transcript_file=transcript_file)
+    start = path.stat().st_size if path.exists() else 0
+    msg_count = 0
     with path.open("a", encoding="utf-8") as f:
         for msg in messages:
             if not isinstance(msg, dict):
@@ -177,7 +241,15 @@ def append_messages(
             }
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             parent_id = eid
+            msg_count += 1
         _append_leaf_pointer(f=f, leaf_id=parent_id)
+    end = path.stat().st_size
+    _notify_transcript_index_delta(
+        transcript_file=str(path),
+        session_id=session_id,
+        bytes_delta=max(0, end - start),
+        messages_delta=msg_count,
+    )
 
 
 def read_messages(
