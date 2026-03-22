@@ -21,6 +21,13 @@ pip install -e .
 
 依赖：Python ≥ 3.8，参见 `setup.py` 中的 `install_requires`（如 click、fastapi、uvicorn、cryptography、httpx 等）。
 
+**SOCKS 代理**：若 `HTTP_PROXY` / `HTTPS_PROXY` 为 `socks5://` / `socks://`，需额外安装 SOCKS 支持，否则 httpx 会报错缺少 `socksio`：
+
+```bash
+pip install -e ".[socks]"
+# 或：pip install httpx[socks]
+```
+
 ## 使用
 
 安装后可通过命令行使用：
