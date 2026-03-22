@@ -9,8 +9,9 @@
 若已配置 Feishu（见下节），**直接启动 Gateway 即可**：Feishu Webhook 会挂载在同一进程内，无需再单独执行 `channels feishu run`。
 
 ```bash
-# 先配置 feishu（app_id / app_secret）
-mw4agent configuration set-channels --channel feishu --app-id <APP_ID> --app-secret <APP_SECRET>
+# 先配置 feishu（app_id / app_secret），任选其一：
+mw4agent channels feishu add --app-id <APP_ID> --app-secret <APP_SECRET>
+# 或：mw4agent configuration set-channels --channel feishu --app-id <APP_ID> --app-secret <APP_SECRET>
 
 # 启动 Gateway（Feishu 事件订阅 URL 填同一地址的 /feishu/webhook）
 mw4agent gateway run --bind 0.0.0.0 --port 18790
@@ -19,17 +20,51 @@ mw4agent gateway run --bind 0.0.0.0 --port 18790
 - 默认使用 **webhook**：飞书应用后台「事件订阅」请求 URL 填 `http://<网关地址>:18790/feishu/webhook`（或你的公网/ngrok 地址）。
 - 若在配置中设置 **`connection_mode: "websocket"`**，则随 Gateway 启动的是 lark-oapi 长连接，无需在飞书后台填请求 URL。
 
+### 0.1 多个飞书应用（多账号 + 绑定不同 Agent）
+
+在 `channels.feishu.accounts` 下为每个应用写一组凭证，并可指定 `agent_id`。**启动 Gateway 时会自动注册全部账号**（各自 webhook 路径或各自 WS 连接）。
+
+```json
+{
+  "channels": {
+    "feishu": {
+      "connection_mode": "webhook",
+      "accounts": {
+        "sales": {
+          "app_id": "cli_sales",
+          "app_secret": "...",
+          "agent_id": "sales_bot"
+        },
+        "support": {
+          "app_id": "cli_support",
+          "app_secret": "...",
+          "agent_id": "support_bot",
+          "webhook_path": "/feishu/webhook/support"
+        }
+      }
+    }
+  }
+}
+```
+
+- CLI：`mw4agent channels feishu add --account sales --app-id ... --app-secret ... --agent-id sales_bot`
+- 运行时入站 `InboundContext.channel` 为 `feishu:sales` 等；工具策略未单独配置时可回退到 `tools.by_channel.feishu`。
+
 ### 1. 配置凭证与连接模式
 
 Feishu 需要 **App ID** 和 **App Secret**，任选其一即可。连接模式 **connection_mode** 决定随 Gateway 启动时用 webhook 还是 websocket（默认 `webhook`）：
 
 - **方式 A：配置文件**（推荐）
   ```bash
+  # 专用子命令（与 set-channels 等价，写入 channels.feishu）
+  mw4agent channels feishu add --app-id <APP_ID> --app-secret <APP_SECRET>
+  # 省略参数时会交互式提示；也可用环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET
+
   # webhook（默认）：飞书事件订阅填 Gateway 的 /feishu/webhook
   mw4agent configuration set-channels --channel feishu --app-id <APP_ID> --app-secret <APP_SECRET>
 
   # 使用 websocket（lark-oapi 长连接，无需在飞书填请求 URL）
-  mw4agent configuration set-channels --channel feishu --app-id <APP_ID> --app-secret <APP_SECRET> --connection-mode websocket
+  mw4agent channels feishu add --app-id <APP_ID> --app-secret <APP_SECRET> --connection-mode websocket
   ```
   写入 `~/.mw4agent/mw4agent.json` 的 `channels.feishu`（含 `connection_mode`），入站/出站都会自动读取。
 

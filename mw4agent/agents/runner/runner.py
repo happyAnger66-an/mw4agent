@@ -28,7 +28,7 @@ from ..tools.policy import resolve_tool_policy_config, resolve_effective_policy_
 from ..tools.fs_policy import resolve_tool_fs_policy_config
 from ..queue.manager import CommandQueue
 from ..events.stream import EventStream
-from ...config.paths import get_default_workspace_dir
+from ...config.paths import resolve_agent_workspace_dir
 from ...llm import generate_reply, generate_reply_with_tools, LLMUsage
 from ..reasoning import split_reasoning_and_text
 from ..skills.snapshot import build_skill_snapshot
@@ -53,6 +53,18 @@ from ..session.transcript import (
 from ..tools.web_search_tool import is_web_search_enabled
 
 MAX_TOOL_ROUNDS = 16
+
+
+def _resolve_run_workspace_dir(params: AgentRunParams) -> str:
+    """Tools/memory/transcript cwd when params.workspace_dir is unset.
+
+    Aligns with multi-agent layout: ~/.mw4agent/agents/<agentId>/workspace/
+    (unless MW4AGENT_WORKSPACE_DIR globally overrides — see resolve_agent_workspace_dir).
+    """
+    wd = params.workspace_dir
+    if wd is not None and str(wd).strip():
+        return os.path.abspath(str(wd).strip())
+    return resolve_agent_workspace_dir(params.agent_id)
 
 _TOOL_NAME_ALIASES = {
     "bash": "exec",
@@ -225,6 +237,7 @@ class AgentRunner:
                     "run_id": run_id,
                     "session_id": session_id,
                     "session_key": session_key,
+                    "agent_id": params.agent_id,
                 },
             )
         )
@@ -253,6 +266,7 @@ class AgentRunner:
                         "run_id": run_id,
                         "session_id": session_id,
                         "status": "completed",
+                        "agent_id": params.agent_id,
                     },
                 )
             )
@@ -271,6 +285,7 @@ class AgentRunner:
                         "run_id": run_id,
                         "session_id": session_id,
                         "error": str(e),
+                        "agent_id": params.agent_id,
                     },
                 )
             )
@@ -318,7 +333,7 @@ class AgentRunner:
         # --- Attach skills snapshot to session & build prompt --------------
         # logger.info(f"Building skills snapshot for session {session_entry.session_id}")
         skills_snapshot = build_skill_snapshot(
-            workspace_dir=params.workspace_dir or get_default_workspace_dir()
+            workspace_dir=_resolve_run_workspace_dir(params)
         )
         skills_prompt = ''
         if skills_snapshot.get("prompt"):
@@ -397,7 +412,7 @@ class AgentRunner:
                 "run_id": run_id,
                 "session_key": params.session_key,
                 "agent_id": params.agent_id,
-                "workspace_dir": params.workspace_dir or get_default_workspace_dir(),
+                "workspace_dir": _resolve_run_workspace_dir(params),
                 "tools_profile": effective_policy.profile,
                 "tools_allow": resolve_effective_allow_patterns(effective_policy),
                 "tools_deny": effective_policy.deny,
@@ -476,7 +491,7 @@ class AgentRunner:
                 root_cfg=root_cfg if isinstance(root_cfg, dict) else {},
                 transcript_file=transcript_file,
                 transcript_session_id=session_entry.session_id,
-                transcript_cwd=params.workspace_dir or get_default_workspace_dir(),
+                transcript_cwd=_resolve_run_workspace_dir(params),
             )
 
             history_limit = resolve_history_limit_turns(
@@ -512,7 +527,7 @@ class AgentRunner:
                 "session_key": params.session_key,
                 "session_id": session_entry.session_id,
                 "agent_id": params.agent_id,
-                "workspace_dir": params.workspace_dir or get_default_workspace_dir(),
+                "workspace_dir": _resolve_run_workspace_dir(params),
                 "channel": params.channel,
                 "sender_id": params.sender_id,
                 "sender_is_owner": params.sender_is_owner,

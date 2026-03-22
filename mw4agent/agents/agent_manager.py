@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -34,6 +35,8 @@ class AgentConfig:
     created_at: int = 0
     updated_at: int = 0
     metadata: Optional[Dict[str, Any]] = None
+    # Optional per-agent LLM overrides (merged with global ~/.mw4agent/mw4agent.json llm section).
+    llm: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         now = int(time.time() * 1000)
@@ -85,6 +88,8 @@ class AgentManager:
         created_at = int(data.get("created_at") or data.get("createdAt") or 0) or 0
         updated_at = int(data.get("updated_at") or data.get("updatedAt") or 0) or 0
         meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else None
+        llm_raw = data.get("llm")
+        llm = dict(llm_raw) if isinstance(llm_raw, dict) else None
         return AgentConfig(
             agent_id=aid,
             agent_dir=os.path.abspath(agent_dir),
@@ -92,6 +97,7 @@ class AgentManager:
             created_at=created_at,
             updated_at=updated_at,
             metadata=meta,
+            llm=llm,
         )
 
     def get_or_create(
@@ -124,6 +130,7 @@ class AgentManager:
             created_at=now,
             updated_at=now,
             metadata={},
+            llm=None,
         )
         self.save(cfg)
         return cfg
@@ -147,4 +154,42 @@ class AgentManager:
         # Creating the agent on-demand ensures per-agent session stores are always available.
         self.get_or_create(aid)
         return resolve_agent_sessions_file(aid)
+
+    def delete(self, agent_id: str, *, allow_main: bool = False) -> bool:
+        """Remove ``~/.mw4agent/agents/<agentId>/`` and all contents (sessions, workspace, etc.).
+
+        Only deletes the canonical per-agent directory under the agents root (never follows a
+        custom ``agent_dir`` path from ``agent.json`` that may point outside).
+
+        Args:
+            agent_id: Target agent id (normalized like other APIs).
+            allow_main: If False (default), refuses to delete the default ``main`` agent.
+
+        Returns:
+            True if a directory existed and was removed, False if nothing was on disk.
+
+        Raises:
+            ValueError: If deleting ``main`` without ``allow_main``, or path safety checks fail.
+        """
+        aid = normalize_agent_id(agent_id)
+        if aid == DEFAULT_AGENT_ID and not allow_main:
+            raise ValueError(
+                "refusing to delete default agent 'main' (use --force if you really mean it)"
+            )
+
+        root_resolved = self.root.resolve()
+        agent_path = Path(resolve_agent_dir(aid)).resolve()
+
+        if agent_path.parent != root_resolved:
+            raise ValueError(f"refusing to delete: agent path not a direct child of agents root: {agent_path}")
+        if agent_path.name != aid:
+            raise ValueError("refusing to delete: agent directory name does not match agent id")
+
+        if not agent_path.exists():
+            return False
+        if not agent_path.is_dir():
+            raise ValueError(f"refusing to delete: not a directory: {agent_path}")
+
+        shutil.rmtree(agent_path)
+        return True
 

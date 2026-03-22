@@ -16,7 +16,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -66,6 +66,46 @@ def _is_safe_rel_path(path: str) -> bool:
     return True
 
 
+def _normalize_agent_id_for_runs(agent_id: Optional[str]) -> str:
+    from ..config.paths import normalize_agent_id
+
+    return normalize_agent_id(agent_id)
+
+
+def _run_status_for_agent(state: GatewayState, agent_id: str) -> Dict[str, Any]:
+    """Summarize Gateway run records scoped to an agent (for dashboard)."""
+    target = _normalize_agent_id_for_runs(agent_id)
+    running = 0
+    last_snap: Optional[RunSnapshot] = None
+    last_ended = -1
+    for rec in state.runs.values():
+        ra = rec.agent_id
+        if ra is None or not str(ra).strip():
+            continue
+        if _normalize_agent_id_for_runs(ra) != target:
+            continue
+        if not rec.done.is_set():
+            running += 1
+        snap = rec.snapshot
+        if snap and snap.ended_at is not None and int(snap.ended_at) > last_ended:
+            last_ended = int(snap.ended_at)
+            last_snap = snap
+    out: Dict[str, Any] = {
+        "state": "running" if running > 0 else "idle",
+        "activeRuns": running,
+        "lastRun": None,
+    }
+    if last_snap:
+        out["lastRun"] = {
+            "runId": last_snap.run_id,
+            "status": last_snap.status,
+            "startedAt": last_snap.started_at,
+            "endedAt": last_snap.ended_at,
+            "error": last_snap.error,
+        }
+    return out
+
+
 def create_app(
     *,
     session_file: str = "",
@@ -89,50 +129,68 @@ def create_app(
         session_manager = MultiAgentSessionManager(agent_manager=agent_manager)
     runner = AgentRunner(session_manager)
 
-    # --- Feishu channel: if configured, webhook 挂载到 app 或 websocket 随进程启动（由配置 connection_mode 决定）---
-    feishu_webhook_router = None
-    feishu_ws_start: Optional[tuple] = None  # (plugin, dispatcher) for lifespan
+    # --- Feishu：按 channels.feishu 解析出的全部账号自动注册；webhook 挂载多路由，websocket 在 lifespan 内各启一条连接 ---
+    feishu_webhook_routers: List[Any] = []
+    feishu_ws_plugins: List[Any] = []
+    feishu_ws_dispatcher: Optional[Any] = None
     try:
         from ..config import read_root_section
+        from ..channels.dispatcher import ChannelDispatcher, ChannelRuntime
+        from ..channels.feishu_accounts import list_feishu_accounts
+        from ..channels.plugins.feishu import FeishuChannel
+        from ..channels.registry import ChannelRegistry
+
         channels = read_root_section("channels", default={})
-        feishu_cfg = channels.get("feishu") or {}
-        app_id = (feishu_cfg.get("app_id") or "").strip() or os.getenv("FEISHU_APP_ID", "").strip()
-        app_secret = (feishu_cfg.get("app_secret") or "").strip() or os.getenv("FEISHU_APP_SECRET", "").strip()
-        connection_mode = (feishu_cfg.get("connection_mode") or "webhook").strip().lower()
-        if connection_mode not in ("webhook", "websocket"):
-            connection_mode = "webhook"
-        if app_id and app_secret:
-            from ..channels.dispatcher import ChannelDispatcher, ChannelRuntime
-            from ..channels.plugins.feishu import FeishuChannel
-            from ..channels.registry import ChannelRegistry
+        feishu_section = channels.get("feishu") or {}
+        env_id = os.getenv("FEISHU_APP_ID", "").strip()
+        env_sec = os.getenv("FEISHU_APP_SECRET", "").strip()
+        feishu_accounts = list_feishu_accounts(feishu_section, env_app_id=env_id, env_app_secret=env_sec)
+        if feishu_accounts:
             registry = ChannelRegistry()
-            feishu_plugin = FeishuChannel(connection_mode=connection_mode, path="/feishu/webhook")
-            registry.register_plugin(feishu_plugin)
+            feishu_plugins: List[Any] = []
+            for acc in feishu_accounts:
+                feishu_plugin = FeishuChannel(feishu_account=acc)
+                registry.register_plugin(feishu_plugin)
+                feishu_plugins.append(feishu_plugin)
             runtime = ChannelRuntime(
                 session_manager=session_manager,
                 agent_runner=runner,
                 gateway_base_url=None,
             )
             dispatcher = ChannelDispatcher(runtime=runtime, registry=registry)
-            if connection_mode == "webhook":
-                feishu_webhook_router = feishu_plugin.get_webhook_router(on_inbound=dispatcher.dispatch_inbound)
-                logger.info("Feishu channel enabled (webhook, will mount at /feishu/webhook)")
-            else:
-                feishu_ws_start = (feishu_plugin, dispatcher)
-                logger.info("Feishu channel enabled (websocket, will start in lifespan)")
+            feishu_ws_dispatcher = dispatcher
+            for p in feishu_plugins:
+                if p.connection_mode == "webhook":
+                    feishu_webhook_routers.append(
+                        p.get_webhook_router(on_inbound=dispatcher.dispatch_inbound)
+                    )
+                    logger.info(
+                        "Feishu channel enabled (webhook): account=%s path=%s agent=%s",
+                        p._account_key,
+                        p.path,
+                        p._default_agent_id,
+                    )
+                else:
+                    feishu_ws_plugins.append(p)
+                    logger.info(
+                        "Feishu channel enabled (websocket, lifespan): account=%s agent=%s",
+                        p._account_key,
+                        p._default_agent_id,
+                    )
     except Exception as e:
         logger.debug("Feishu channel not started: %s", e)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        if feishu_ws_start:
-            plugin, disp = feishu_ws_start
-            asyncio.create_task(plugin._run_ws_monitor(on_inbound=disp.dispatch_inbound))
+        if feishu_ws_dispatcher is not None:
+            disp = feishu_ws_dispatcher
+            for plugin in feishu_ws_plugins:
+                asyncio.create_task(plugin._run_ws_monitor(on_inbound=disp.dispatch_inbound))
         yield
 
     app = FastAPI(title="MW4Agent Gateway", version="0.1", lifespan=lifespan)
-    if feishu_webhook_router is not None:
-        app.include_router(feishu_webhook_router)
+    for r in feishu_webhook_routers:
+        app.include_router(r)
 
     # --- Bridge AgentRunner events -> Gateway WS broadcasts + run snapshots ---
     async def handle_agent_stream_event(evt) -> None:
@@ -141,7 +199,13 @@ def create_app(
         if not run_id:
             return
 
-        rec = state.ensure_run(run_id=run_id, session_key=str(evt.data.get("session_key") or ""))
+        aid = evt.data.get("agent_id")
+        agent_id_ev = str(aid).strip() if aid is not None and str(aid).strip() else None
+        rec = state.ensure_run(
+            run_id=run_id,
+            session_key=str(evt.data.get("session_key") or ""),
+            agent_id=agent_id_ev,
+        )
         rec.seq += 1
 
         if evt.stream == "lifecycle":
@@ -423,7 +487,7 @@ def create_app(
                 return {"id": req_id, "ok": cached.ok, "payload": cached.payload, "error": cached.error}
 
             run_id = str(params.get("runId") or state.new_run_id())
-            state.ensure_run(run_id=run_id, session_key=session_key)
+            state.ensure_run(run_id=run_id, session_key=session_key, agent_id=agent_id)
 
             accepted = {
                 "runId": run_id,
@@ -548,6 +612,37 @@ def create_app(
                     "replyText": snap.reply_text,
                 },
             }
+
+        if method == "agents.list":
+            try:
+                from ..config.paths import normalize_agent_id, resolve_agent_sessions_file
+            except Exception as e:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "unavailable", "message": f"agents.list failed: {e}"},
+                }
+            items: List[Dict[str, Any]] = []
+            for raw_id in agent_manager.list_agents():
+                aid = normalize_agent_id(raw_id)
+                cfg_existing = agent_manager.get(aid)
+                configured = cfg_existing is not None
+                cfg = cfg_existing or agent_manager.get_or_create(aid)
+                sessions_file = resolve_agent_sessions_file(aid)
+                run_st = _run_status_for_agent(state, aid)
+                items.append(
+                    {
+                        "agentId": aid,
+                        "configured": configured,
+                        "agentDir": cfg.agent_dir,
+                        "workspaceDir": cfg.workspace_dir,
+                        "sessionsFile": sessions_file,
+                        "createdAt": cfg.created_at,
+                        "updatedAt": cfg.updated_at,
+                        "runStatus": run_st,
+                    }
+                )
+            return {"id": req_id, "ok": True, "payload": {"agents": items}}
 
         if method == "health":
             return {"id": req_id, "ok": True, "payload": await health()}

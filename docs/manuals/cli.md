@@ -189,7 +189,15 @@ python -m mw4agent channels webhook run \
 
 ### 4.4 Feishu 通道（Webhook / WebSocket）
 
-Webhook 模式示例：
+将飞书应用凭证写入根配置（`channels.feishu`），供 Gateway 或 `feishu run` 使用：
+
+```bash
+mw4agent channels feishu add --app-id <APP_ID> --app-secret <APP_SECRET>
+# 可选：--connection-mode webhook|websocket；--json 输出摘要（密钥脱敏）
+# 凭证也可来自环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET；未传参时会提示输入。
+```
+
+Webhook 模式运行示例（独立进程）：
 
 ```bash
 python -m mw4agent channels feishu run \
@@ -450,7 +458,7 @@ mw4agent configuration auth effective \
 
 `dashboard` 命令用于快速打开基于浏览器的 **MW4Agent 控制台**，它通过：
 
-- `POST /rpc` 调用 Gateway 的 RPC（目前主要是 `agent`）；
+- `POST /rpc` 调用 Gateway 的 RPC（如 `agent`、`agents.list`、`config.*` 等）；
 - `WS /ws` 订阅 Agent 事件流（assistant 文本流、生命周期事件等）；
 - 前端是一个单页应用（SPA），由 Gateway 在根路径 `/` 提供静态资源。
 
@@ -505,7 +513,9 @@ mw4agent dashboard --no-open
   - 前端把 assistant 文本消息渲染到聊天窗口。
 - 右侧是 Gateway 状态面板：
   - 展示 WebSocket 是否已连接；
-  - 展示最近一次运行的 `runId` 与收到的事件总数。
+  - 展示最近一次运行的 `runId` 与收到的事件总数；
+  - **Agents** 标签：调用 `agents.list`，列出各 Agent 的目录配置、`agentId` 与本 Gateway 进程内的运行状态（空闲 / 运行中、最近完成的 run）。
+- **Config** 标签：分区查看/编辑根配置 `mw4agent.json`。
 
 后续可以在这个骨架基础上扩展：
 

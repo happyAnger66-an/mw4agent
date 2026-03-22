@@ -10,6 +10,7 @@
 - **每个 agent 独立状态目录**：`agent_dir`
 - **每个 agent 独立 workspace**：`workspace_dir`（供 read/write 等工具使用）
 - **每个 agent 独立 session store**：`sessions/sessions.json`
+- **可选：每个 agent 独立 LLM 配置**：`agent.json` 内 `llm` 对象，覆盖根配置 `mw4agent.json` 的 `llm` 段（见下文）
 - **迁移要安全/幂等**：旧 store 不删除，迁移成功后会创建备份
 
 ---
@@ -32,10 +33,37 @@
         sessions.json
 ```
 
+`agent.json` 中可增加 **`llm`** 对象（与根配置 `llm` 字段名一致），例如：
+
+```json
+{
+  "agent_id": "coders",
+  "agent_dir": "...",
+  "workspace_dir": "...",
+  "llm": {
+    "provider": "deepseek",
+    "model": "deepseek-chat",
+    "base_url": "https://api.deepseek.com",
+    "api_key": "sk-..."
+  }
+}
+```
+
+**解析优先级**（每个字段独立取第一个非空值）：`AgentRunParams` 显式字段 → 当前 agent 的 `llm` → 根 `mw4agent.json` 的 `llm` → 环境变量 `MW4AGENT_LLM_*`。实现见 `mw4agent/llm/backends.py` 中 `_resolve_llm_settings`。
+
+CLI：
+
+```bash
+mw4agent agent set-llm coders --provider deepseek --model-id deepseek-chat
+mw4agent agent show coders   # llm.api_key 显示为 ********
+mw4agent agent set-llm coders --clear   # 去掉 per-agent 覆盖
+```
+
 关键实现位置：
 
 - `mw4agent/config/paths.py`
 - `mw4agent/agents/agent_manager.py`
+- `mw4agent/llm/backends.py`
 
 ---
 
@@ -49,8 +77,12 @@
   - `mw4agent agent list`
 - 查看：
   - `mw4agent agent show [agent_id]`（默认 main）
+- 删除：
+  - `mw4agent agent del <agent_id>`：删除 `~/.mw4agent/agents/<agentId>/` 整目录（含 `agent.json`、`sessions/`、`workspace/` 等）。
+  - 默认**禁止**删除默认 agent `main`；若确需删除，可加 `--force`（危险操作）。
+  - 若目录不存在，命令以非零退出码结束并输出 JSON 错误。
 
-实现：`mw4agent/cli/agent/register.py`
+实现：`mw4agent/cli/agent/register.py`、`mw4agent/agents/agent_manager.py`（`AgentManager.delete`）
 
 ### 3.2 运行（指定 agent）
 

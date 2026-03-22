@@ -56,7 +56,7 @@ class ExecTool(AgentTool):
                 },
                 "required": ["command"],
             },
-            owner_only=False,
+            owner_only=True,
         )
 
     async def execute(

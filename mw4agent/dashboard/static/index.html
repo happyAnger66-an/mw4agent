@@ -656,6 +656,92 @@
       .log-empty.hidden {
         display: none;
       }
+
+      .agents-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 10px;
+        flex-wrap: wrap;
+      }
+
+      .agents-table-wrap {
+        overflow: auto;
+        max-height: 55vh;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--messages-border);
+        background: var(--messages-bg);
+      }
+
+      .agents-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11px;
+      }
+
+      .agents-table th,
+      .agents-table td {
+        padding: 8px 10px;
+        text-align: left;
+        border-bottom: 1px solid var(--panel-header-border);
+        vertical-align: top;
+      }
+
+      .agents-table th {
+        position: sticky;
+        top: 0;
+        background: var(--panel);
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 10px;
+        z-index: 1;
+      }
+
+      .agents-table tr:last-child td {
+        border-bottom: none;
+      }
+
+      .agents-table .path-cell {
+        font-family: ui-monospace, "Cascadia Code", "SF Mono", monospace;
+        word-break: break-all;
+        max-width: 0;
+      }
+
+      .agents-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .agents-badge.running {
+        background: rgba(34, 197, 94, 0.2);
+        color: #16a34a;
+        border: 1px solid rgba(34, 197, 94, 0.45);
+      }
+
+      [data-theme="soft-dark"] .agents-badge.running,
+      [data-theme="dark"] .agents-badge.running {
+        color: #4ade80;
+      }
+
+      .agents-badge.idle {
+        background: var(--meta-badge-bg);
+        color: var(--text-muted);
+        border: 1px solid var(--border);
+      }
+
+      .agents-meta-line {
+        font-size: 10px;
+        color: var(--text-muted);
+        margin-top: 4px;
+      }
     </style>
   </head>
   <body>
@@ -724,6 +810,7 @@
           <div class="panel-header panel-header-tabs">
             <div class="right-tabs">
               <button type="button" class="right-tab active" data-tab="gateway" data-i18n="gateway">Gateway</button>
+              <button type="button" class="right-tab" data-tab="agents" data-i18n="agents">Agents</button>
               <button type="button" class="right-tab" data-tab="logs" data-i18n="events">Events</button>
               <button type="button" class="right-tab" data-tab="config" data-i18n="config">Config</button>
             </div>
@@ -753,6 +840,27 @@
               <div class="footer-hint" data-i18n="footerHint">
                 This is a minimal skeleton. You can evolve it into a full Control UI (sessions, channels, skills, cron, etc.).
               </div>
+            </div>
+          </div>
+          <div id="right-panel-agents" class="right-panel-content hidden">
+            <div class="log-panel">
+              <div class="agents-toolbar">
+                <span style="font-size:12px; color: var(--text-muted);" data-i18n="agentsSubtitle">Per-agent directories and Gateway run status.</span>
+                <button type="button" id="agents-refresh" class="lang-btn" data-i18n="refresh">Refresh</button>
+              </div>
+              <div class="agents-table-wrap">
+                <table class="agents-table" id="agents-table">
+                  <thead>
+                    <tr>
+                      <th data-i18n="colAgentId">Agent ID</th>
+                      <th data-i18n="colRunStatus">Run status</th>
+                      <th data-i18n="colPaths">Directories</th>
+                    </tr>
+                  </thead>
+                  <tbody id="agents-tbody"></tbody>
+                </table>
+              </div>
+              <div class="log-empty" id="agents-empty" data-i18n="agentsEmpty">No agents loaded.</div>
             </div>
           </div>
           <div id="right-panel-logs" class="right-panel-content hidden">

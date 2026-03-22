@@ -25,6 +25,10 @@ from .types import InboundContext, OutboundPayload
 logger = get_logger(__name__)
 
 
+def _is_feishu_channel(channel: str) -> bool:
+    return channel == "feishu" or (channel or "").startswith("feishu:")
+
+
 @dataclass(frozen=True)
 class ChannelRuntime:
     session_manager: SessionManager
@@ -58,11 +62,16 @@ class ChannelDispatcher:
 
         # Feishu：在用户消息下添加「思考/正在输入」表情，回复完成或异常后移除（与 OpenClaw 一致）
         typing_state = None
-        if ctx.channel == "feishu" and isinstance(ctx.extra, dict):
+        if _is_feishu_channel(ctx.channel) and isinstance(ctx.extra, dict):
             msg_id = ctx.extra.get("message_id") or ctx.extra.get("messageId")
             if msg_id:
-                from .feishu_outbound import add_typing_indicator
-                typing_state = await add_typing_indicator(str(msg_id))
+                fn_begin = getattr(plugin, "feishu_typing_begin", None)
+                if callable(fn_begin):
+                    typing_state = await fn_begin(str(msg_id))
+                else:
+                    from .feishu_outbound import add_typing_indicator
+
+                    typing_state = await add_typing_indicator(str(msg_id))
 
         try:
             # Call agent via Gateway RPC (aligned with OpenClaw) or direct AgentRunner
@@ -93,8 +102,13 @@ class ChannelDispatcher:
                 logger.warning("channel=%s agent returned empty reply", ctx.channel)
         finally:
             if typing_state is not None:
-                from .feishu_outbound import remove_typing_indicator
-                await remove_typing_indicator(typing_state)
+                fn_end = getattr(plugin, "feishu_typing_end", None)
+                if callable(fn_end):
+                    await fn_end(typing_state)
+                else:
+                    from .feishu_outbound import remove_typing_indicator
+
+                    await remove_typing_indicator(typing_state)
 
     async def _call_agent_via_gateway(self, ctx: InboundContext) -> Optional[str]:
         """Call agent via Gateway RPC (aligned with OpenClaw)."""

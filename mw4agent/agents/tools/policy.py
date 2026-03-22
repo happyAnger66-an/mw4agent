@@ -154,6 +154,16 @@ def _lookup_nested_policy(
         raw = by_channel.get(channel)
         if isinstance(raw, dict):
             return _load_tool_policy_from_dict(raw)
+        # feishu:sales 等子通道未单独配置时回退到 feishu
+        if (
+            raw is None
+            and isinstance(channel, str)
+            and channel.startswith("feishu:")
+            and channel != "feishu"
+        ):
+            raw_fb = by_channel.get("feishu")
+            if isinstance(raw_fb, dict):
+                return _load_tool_policy_from_dict(raw_fb)
 
     return None
 

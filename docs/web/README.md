@@ -64,8 +64,13 @@
 | 文件 | 说明 |
 |------|------|
 | `mw4agent/dashboard/static/index.html` | 单页结构、主题变量与 data-i18n 标记、语言/主题切换器 DOM |
-| `mw4agent/dashboard/static/app.js` | 入口逻辑、WebSocket/RPC、调用 `applyToPage`/`applyTheme`、切换器事件 |
+| `mw4agent/dashboard/static/app.js` | 入口逻辑、WebSocket/RPC、`agents.list` 多 Agent 面板、调用 `applyToPage`/`applyTheme`、切换器事件 |
 | `mw4agent/dashboard/static/i18n.js` | 多语言文案与 `t`/`applyToPage` |
 | `mw4agent/dashboard/static/theme.js` | 主题检测、`data-theme` 与 `applyTheme` |
 
 以上静态资源由 Gateway 在 `/dashboard` 下提供（见 [CLI 手册](../manuals/cli.md) 中的 Dashboard 小节），安装时通过 `setup.py` 的 `package_data` 打包进 `mw4agent` 包。
+
+### 3.1 Agents 标签页
+
+- 右侧面板 **Agents** 通过 `POST /rpc` 调用 `method: "agents.list"`，展示各 `agentId` 的 `agent_dir`、`workspace_dir`、会话存储路径，以及 Gateway 进程内该 Agent 的 **运行状态**（`idle` / `running`、活动运行数、最近一次完成的 `run` 摘要）。
+- 后端实现：`mw4agent/gateway/server.py`（`agents.list`）；运行状态来自 `GatewayState` 中与 `agent_id` 关联的 `RunRecord`。

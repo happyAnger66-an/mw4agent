@@ -14,6 +14,7 @@ def test_llm_config_provider_and_model_precedence(monkeypatch, tmp_path: Path) -
     # Isolate config directory
     cfg_dir = tmp_path / "config"
     monkeypatch.setenv("MW4AGENT_CONFIG_DIR", str(cfg_dir))
+    monkeypatch.setenv("MW4AGENT_STATE_DIR", str(tmp_path / "mw_state"))
 
     # Reset default config manager singleton
     import mw4agent.config.manager as cfg_mod

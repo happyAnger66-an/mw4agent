@@ -3,12 +3,14 @@
 import asyncio
 import json as jsonlib
 import uuid
+from dataclasses import asdict
 from typing import Optional
 
 import click
 
 from ..context import ProgramContext
 from ...agents.agent_manager import AgentManager
+from ...config.paths import normalize_agent_id
 from ...gateway.client import call_rpc
 from ...agents.tools import GatewayLsTool
 
@@ -37,7 +39,7 @@ def register_agent_cli(program: click.Group, ctx: ProgramContext) -> None:
             agent_dir=agent_dir.strip() or None,
             workspace_dir=workspace_dir.strip() or None,
         )
-        click.echo(jsonlib.dumps({"ok": True, "agent": cfg.__dict__}, ensure_ascii=False, indent=2))
+        click.echo(jsonlib.dumps({"ok": True, "agent": asdict(cfg)}, ensure_ascii=False, indent=2))
 
     @agent_group.command("list", help="List agents under ~/.mw4agent/agents")
     def agent_list() -> None:
@@ -51,7 +53,92 @@ def register_agent_cli(program: click.Group, ctx: ProgramContext) -> None:
         mgr = AgentManager()
         aid = (agent_id or "").strip() or "main"
         cfg = mgr.get(aid) or mgr.get_or_create(aid)
-        click.echo(jsonlib.dumps({"agent": cfg.__dict__}, ensure_ascii=False, indent=2))
+        payload = asdict(cfg)
+        if payload.get("llm") and isinstance(payload["llm"], dict):
+            redacted = dict(payload["llm"])
+            if redacted.get("api_key"):
+                redacted["api_key"] = "********"
+            payload["llm"] = redacted
+        click.echo(jsonlib.dumps({"agent": payload}, ensure_ascii=False, indent=2))
+
+    @agent_group.command(
+        "set-llm",
+        help="Set per-agent LLM overrides in agent.json (merged over global mw4agent.json llm)",
+    )
+    @click.argument("agent_id", nargs=1)
+    @click.option("--provider", default="", help="LLM provider id (e.g. openai, deepseek, echo)")
+    @click.option("--model-id", "model_id", default="", help="Model id / model_id")
+    @click.option("--base-url", default="", help="API base URL (OpenAI-compatible)")
+    @click.option("--api-key", default="", help="API key (stored in agent.json; omit to leave unchanged)")
+    @click.option("--clear", is_flag=True, help="Remove per-agent llm overrides")
+    def agent_set_llm(
+        agent_id: str,
+        provider: str,
+        model_id: str,
+        base_url: str,
+        api_key: str,
+        clear: bool,
+    ) -> None:
+        mgr = AgentManager()
+        aid = (agent_id or "").strip() or "main"
+        cfg = mgr.get_or_create(aid)
+        if clear:
+            cfg.llm = None
+            mgr.save(cfg)
+            click.echo(jsonlib.dumps({"ok": True, "agentId": aid, "llm": None}, ensure_ascii=False, indent=2))
+            return
+        llm = dict(cfg.llm or {})
+        if provider.strip():
+            llm["provider"] = provider.strip()
+        if model_id.strip():
+            llm["model"] = model_id.strip()
+        if base_url.strip():
+            llm["base_url"] = base_url.strip()
+        if api_key.strip():
+            llm["api_key"] = api_key.strip()
+        if not llm:
+            raise click.UsageError("Provide at least one of --provider, --model-id, --base-url, --api-key, or --clear")
+        cfg.llm = llm
+        mgr.save(cfg)
+        out = dict(llm)
+        if out.get("api_key"):
+            out["api_key"] = "********"
+        click.echo(jsonlib.dumps({"ok": True, "agentId": aid, "llm": out}, ensure_ascii=False, indent=2))
+
+    @agent_group.command(
+        "del",
+        help="Delete an agent: remove ~/.mw4agent/agents/<agent-id>/ (sessions, workspace, agent.json)",
+    )
+    @click.argument("agent_id", nargs=1)
+    @click.option(
+        "--force",
+        is_flag=True,
+        help="Allow deleting the 'main' agent (dangerous; removes default agent state)",
+    )
+    @click.pass_context
+    def agent_del(click_ctx: click.Context, agent_id: str, force: bool) -> None:
+        mgr = AgentManager()
+        raw = (agent_id or "").strip()
+        if not raw:
+            click.echo("agent_id is required", err=True)
+            click_ctx.exit(2)
+        aid = normalize_agent_id(raw)
+        try:
+            removed = mgr.delete(aid, allow_main=force)
+        except ValueError as e:
+            click.echo(str(e), err=True)
+            click_ctx.exit(1)
+        if not removed:
+            payload = {"ok": False, "error": "not_found", "message": f"agent directory does not exist: {aid}"}
+            click.echo(jsonlib.dumps(payload, ensure_ascii=False, indent=2), err=True)
+            click_ctx.exit(1)
+        click.echo(
+            jsonlib.dumps(
+                {"ok": True, "deleted": True, "agentId": aid},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
 
     @agent_group.command("run", help="Run one agent turn via Gateway RPC (optionally with a tool)")
     @click.option("-m", "--message", required=True, help="User message to send to the agent")

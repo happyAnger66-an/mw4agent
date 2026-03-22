@@ -85,6 +85,78 @@ def _load_llm_config() -> Dict[str, Any]:
         return {}
 
 
+def _first_non_empty_str(*candidates: Optional[Any]) -> str:
+    for c in candidates:
+        if c is None:
+            continue
+        s = str(c).strip()
+        if s:
+            return s
+    return ""
+
+
+def _load_agent_llm_overrides(agent_id: Optional[str]) -> Dict[str, Any]:
+    """Per-agent llm fragment from ~/.mw4agent/agents/<agentId>/agent.json (key \"llm\")."""
+    try:
+        from ..agents.agent_manager import AgentManager
+        from ..config.paths import normalize_agent_id
+
+        aid = normalize_agent_id(agent_id)
+        cfg = AgentManager().get(aid)
+        if cfg is None or not cfg.llm:
+            return {}
+        return dict(cfg.llm)
+    except Exception:
+        return {}
+
+
+def _resolve_llm_settings(params: AgentRunParams) -> Tuple[str, str, Optional[str], Optional[str]]:
+    """Resolve provider, model, base_url, api_key for this run.
+
+    Precedence per field (first non-empty wins):
+    params.* → agent.json ``llm`` → global ``llm`` → environment (MW4AGENT_LLM_*).
+    """
+    g = _load_llm_config()
+    if not isinstance(g, dict):
+        g = {}
+    a = _load_agent_llm_overrides(params.agent_id)
+
+    provider = (
+        _first_non_empty_str(
+            params.provider,
+            a.get("provider"),
+            g.get("provider"),
+            os.getenv("MW4AGENT_LLM_PROVIDER"),
+        )
+        or "echo"
+    ).strip().lower()
+
+    model = _first_non_empty_str(
+        params.model,
+        a.get("model"),
+        a.get("model_id"),
+        g.get("model"),
+        g.get("model_id"),
+        os.getenv("MW4AGENT_LLM_MODEL"),
+    )
+
+    base_url_s = _first_non_empty_str(
+        a.get("base_url"),
+        g.get("base_url"),
+        os.getenv("MW4AGENT_LLM_BASE_URL"),
+    )
+    base_url: Optional[str] = base_url_s if base_url_s else None
+
+    api_key_s = _first_non_empty_str(
+        a.get("api_key"),
+        g.get("api_key"),
+        os.getenv("MW4AGENT_LLM_API_KEY"),
+    )
+    api_key: Optional[str] = api_key_s if api_key_s else None
+
+    return provider, model, base_url, api_key
+
+
 def _call_openai_chat(
     prompt: str,
     *,
@@ -233,30 +305,7 @@ def generate_reply_with_tools(
     """One LLM round with tools. Returns (content, tool_calls, provider, model, usage).
     When provider is echo or tools unsupported, returns (reply_text, [], provider, model, usage).
     """
-    cfg = _load_llm_config()
-    cfg_provider = ""
-    cfg_model = ""
-    cfg_base_url: Optional[str] = None
-    cfg_api_key: Optional[str] = None
-    if isinstance(cfg, dict):
-        cfg_provider = str(cfg.get("provider") or "").strip().lower()
-        cfg_model = str(cfg.get("model") or cfg.get("model_id") or "").strip()
-        raw_base = str(cfg.get("base_url") or "").strip()
-        cfg_base_url = raw_base or None
-        raw_key = str(cfg.get("api_key") or "").strip()
-        cfg_api_key = raw_key or None
-
-    provider = (
-        params.provider
-        or os.getenv("MW4AGENT_LLM_PROVIDER")
-        or cfg_provider
-        or "echo"
-    ).strip().lower()
-    model = (
-        params.model
-        or os.getenv("MW4AGENT_LLM_MODEL")
-        or cfg_model
-    ).strip()
+    provider, model, cfg_base_url, cfg_api_key = _resolve_llm_settings(params)
 
     if provider in ("", "echo", "debug"):
         default_model = "gpt-4o-mini"
@@ -270,7 +319,7 @@ def generate_reply_with_tools(
         reply = f"Agent (unknown-provider:{provider}) reply: {params.message}"
         return reply, [], provider or "echo", model or "gpt-4o-mini", LLMUsage()
 
-    base_url = cfg_base_url or os.getenv("MW4AGENT_LLM_BASE_URL", "").strip() or (spec.default_base_url or "")
+    base_url = (cfg_base_url or "").strip() or (spec.default_base_url or "")
     if spec.base_url_required and not base_url:
         reply = f"Agent (echo:no-base-url:{provider}) reply: {params.message}"
         return reply, [], "echo", model, LLMUsage()
@@ -309,30 +358,7 @@ def generate_reply(params: AgentRunParams, *, messages: Optional[List[Dict[str, 
     Returns:
         reply_text, provider, model, usage
     """
-    cfg = _load_llm_config()
-    cfg_provider = ""
-    cfg_model = ""
-    cfg_base_url: Optional[str] = None
-    cfg_api_key: Optional[str] = None
-    if isinstance(cfg, dict):
-        cfg_provider = str(cfg.get("provider") or "").strip().lower()
-        cfg_model = str(cfg.get("model") or cfg.get("model_id") or "").strip()
-        raw_base = str(cfg.get("base_url") or "").strip()
-        cfg_base_url = raw_base or None
-        raw_key = str(cfg.get("api_key") or "").strip()
-        cfg_api_key = raw_key or None
-
-    provider = (
-        params.provider
-        or os.getenv("MW4AGENT_LLM_PROVIDER")
-        or cfg_provider
-        or "echo"
-    ).strip().lower()
-    model = (
-        params.model
-        or os.getenv("MW4AGENT_LLM_MODEL")
-        or cfg_model
-    ).strip()
+    provider, model, cfg_base_url, cfg_api_key = _resolve_llm_settings(params)
 
     # Echo backend (default, local only)
     if provider in ("", "echo", "debug"):
@@ -350,13 +376,13 @@ def generate_reply(params: AgentRunParams, *, messages: Optional[List[Dict[str, 
         reply = f"Agent (unknown-provider:{provider}) reply: {params.message}"
         return reply, provider or "echo", model or "gpt-4o-mini", LLMUsage()
 
-    # Resolve base_url: config > env > spec default
-    base_url = cfg_base_url or os.getenv("MW4AGENT_LLM_BASE_URL", "").strip() or spec.default_base_url or ""
+    # Resolve base_url: merged config > spec default
+    base_url = (cfg_base_url or "").strip() or spec.default_base_url or ""
     if spec.base_url_required and not base_url:
         reply = f"Agent (echo:no-base-url:{provider}) reply: {params.message}"
         return reply, "echo", model, LLMUsage()
 
-    # Resolve api_key: config > env
+    # Resolve api_key: merged config > provider env
     api_key = (cfg_api_key or os.getenv(spec.api_key_env, "").strip() or "")
     if spec.require_api_key and not api_key:
         reply = f"Agent (echo:no-api-key:{provider}) reply: {params.message}"

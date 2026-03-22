@@ -35,6 +35,7 @@ class RunRecord:
     run_id: str
     session_key: str
     created_at_ms: int
+    agent_id: Optional[str] = None
     started_at_ms: Optional[int] = None
     done: asyncio.Event = field(default_factory=asyncio.Event)
     snapshot: Optional[RunSnapshot] = None
@@ -60,11 +61,24 @@ class GatewayState:
     def get_dedupe(self, key: str) -> Optional[DedupeEntry]:
         return self.dedupe.get(key)
 
-    def ensure_run(self, *, run_id: str, session_key: str) -> RunRecord:
+    def ensure_run(
+        self,
+        *,
+        run_id: str,
+        session_key: str,
+        agent_id: Optional[str] = None,
+    ) -> RunRecord:
         rec = self.runs.get(run_id)
         if rec:
+            if agent_id and not rec.agent_id:
+                rec.agent_id = agent_id
             return rec
-        rec = RunRecord(run_id=run_id, session_key=session_key, created_at_ms=int(time.time() * 1000))
+        rec = RunRecord(
+            run_id=run_id,
+            session_key=session_key,
+            created_at_ms=int(time.time() * 1000),
+            agent_id=agent_id,
+        )
         self.runs[run_id] = rec
         return rec
 

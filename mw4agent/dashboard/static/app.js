@@ -355,8 +355,12 @@ function init() {
   }
 
   const rightPanelGateway = document.getElementById("right-panel-gateway");
+  const rightPanelAgents = document.getElementById("right-panel-agents");
   const rightPanelLogs = document.getElementById("right-panel-logs");
   const rightPanelConfig = document.getElementById("right-panel-config");
+  const agentsTbody = document.getElementById("agents-tbody");
+  const agentsEmptyEl = document.getElementById("agents-empty");
+  const agentsRefreshBtn = document.getElementById("agents-refresh");
   const configEmpty = document.getElementById("config-empty");
   const configSections = document.getElementById("config-sections");
   const configRefreshBtn = document.getElementById("config-refresh");
@@ -430,6 +434,78 @@ function init() {
     }
   }
 
+  function formatTsMs(ms) {
+    if (ms == null || ms === "") return "–";
+    try {
+      const d = new Date(Number(ms));
+      return d.toLocaleString();
+    } catch {
+      return String(ms);
+    }
+  }
+
+  function renderAgentsTable(agents) {
+    if (!agentsTbody) return;
+    agentsTbody.innerHTML = "";
+    if (!agents || !agents.length) {
+      if (agentsEmptyEl) {
+        agentsEmptyEl.classList.remove("hidden");
+        agentsEmptyEl.textContent = t("agentsEmpty");
+      }
+      return;
+    }
+    if (agentsEmptyEl) agentsEmptyEl.classList.add("hidden");
+    for (const a of agents) {
+      const tr = document.createElement("tr");
+      const rs = a.runStatus || {};
+      const st = rs.state === "running" ? "running" : "idle";
+      const badgeClass = st === "running" ? "agents-badge running" : "agents-badge idle";
+      const badgeText = st === "running" ? t("runStateRunning") : t("runStateIdle");
+      const activeN = rs.activeRuns != null ? rs.activeRuns : 0;
+      const lr = rs.lastRun;
+      let lastLine = "–";
+      if (lr) {
+        lastLine = `${t("lastRunLabel")}: ${lr.status || "?"} · ${formatTsMs(lr.endedAt)}`;
+        if (lr.runId) lastLine += ` · ${String(lr.runId).slice(0, 8)}…`;
+      }
+      const cfgBadge = a.configured ? t("configuredBadge") : t("defaultAgentBadge");
+      const activeLine =
+        activeN > 0 ? `<div class="agents-meta-line">${escapeHtml(tFormat("activeRuns", { n: activeN }))}</div>` : "";
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(a.agentId || "")}</strong>
+          <div class="agents-meta-line">${escapeHtml(cfgBadge)}</div></td>
+        <td><span class="${badgeClass}">${escapeHtml(badgeText)}</span>
+          ${activeLine}
+          <div class="agents-meta-line">${escapeHtml(lastLine)}</div></td>
+        <td class="path-cell">
+          <div><b>agent_dir</b> ${escapeHtml(a.agentDir || "")}</div>
+          <div style="margin-top:6px"><b>workspace</b> ${escapeHtml(a.workspaceDir || "")}</div>
+          <div style="margin-top:6px"><b>sessions</b> ${escapeHtml(a.sessionsFile || "")}</div>
+        </td>`;
+      agentsTbody.appendChild(tr);
+    }
+  }
+
+  async function loadAgentsUI() {
+    if (!agentsTbody) return;
+    try {
+      const res = await rpcCall("agents.list", {});
+      if (res && res.ok && res.payload && Array.isArray(res.payload.agents)) {
+        renderAgentsTable(res.payload.agents);
+      } else {
+        if (agentsEmptyEl) {
+          agentsEmptyEl.classList.remove("hidden");
+          agentsEmptyEl.textContent = (res && res.error && res.error.message) || t("agentsLoadError");
+        }
+      }
+    } catch (err) {
+      if (agentsEmptyEl) {
+        agentsEmptyEl.classList.remove("hidden");
+        agentsEmptyEl.textContent = `${t("agentsLoadError")} ${String(err)}`;
+      }
+    }
+  }
+
   async function loadConfigUI() {
     if (configLoaded) return;
     configLoaded = true;
@@ -451,14 +527,23 @@ function init() {
       document.querySelectorAll(".right-tab").forEach((t) => t.classList.toggle("active", t.getAttribute("data-tab") === tabName));
       if (tabName === "gateway") {
         if (rightPanelGateway) rightPanelGateway.classList.remove("hidden");
+        if (rightPanelAgents) rightPanelAgents.classList.add("hidden");
         if (rightPanelLogs) rightPanelLogs.classList.add("hidden");
         if (rightPanelConfig) rightPanelConfig.classList.add("hidden");
+      } else if (tabName === "agents") {
+        if (rightPanelGateway) rightPanelGateway.classList.add("hidden");
+        if (rightPanelAgents) rightPanelAgents.classList.remove("hidden");
+        if (rightPanelLogs) rightPanelLogs.classList.add("hidden");
+        if (rightPanelConfig) rightPanelConfig.classList.add("hidden");
+        loadAgentsUI();
       } else if (tabName === "logs") {
         if (rightPanelGateway) rightPanelGateway.classList.add("hidden");
+        if (rightPanelAgents) rightPanelAgents.classList.add("hidden");
         if (rightPanelLogs) rightPanelLogs.classList.remove("hidden");
         if (rightPanelConfig) rightPanelConfig.classList.add("hidden");
       } else if (tabName === "config") {
         if (rightPanelGateway) rightPanelGateway.classList.add("hidden");
+        if (rightPanelAgents) rightPanelAgents.classList.add("hidden");
         if (rightPanelLogs) rightPanelLogs.classList.add("hidden");
         if (rightPanelConfig) rightPanelConfig.classList.remove("hidden");
         loadConfigUI();
@@ -471,6 +556,12 @@ function init() {
       configLoaded = false;
       setConfigStatus("");
       await loadConfigUI();
+    });
+  }
+
+  if (agentsRefreshBtn) {
+    agentsRefreshBtn.addEventListener("click", async () => {
+      await loadAgentsUI();
     });
   }
 

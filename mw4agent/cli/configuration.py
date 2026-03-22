@@ -1,16 +1,20 @@
 """Configuration CLI for MW4Agent.
 
-Configure LLM provider/model and channels (feishu, console) in ~/.mw4agent/mw4agent.json.
-Interactive wizard: choose section (LLM provider / Channels) then fill in values.
+Configure LLM provider/model and channels (feishu, console) in ~/.mw4agent/mw4agent.json,
+and optional per-agent LLM overrides in ~/.mw4agent/agents/<agentId>/agent.json.
+Interactive wizard: choose section (LLM / Agent LLM / Channels) then fill in values.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import click
 
+from ..agents.agent_manager import AgentManager
+from ..config.paths import normalize_agent_id, resolve_agent_dir
 from ..config.root import get_root_config_path, read_root_config, write_root_config
 from ..llm import list_providers
 from ..agents.tools.policy import (
@@ -26,7 +30,8 @@ SUPPORTED_CHANNELS = ["feishu", "console"]
 
 # Config section choices in wizard: display name -> section key
 CONFIG_SECTION_CHOICES = [
-    ("LLM provider", "llm"),
+    ("LLM provider (global)", "llm"),
+    ("Agent LLM (per-agent override)", "agent_llm"),
     ("Channels", "channels"),
     ("Continue (skip this time)", "skip"),
     ("Done (exit)", "exit"),
@@ -246,8 +251,110 @@ def _run_channels_config(current: Dict[str, Any]) -> Dict[str, Any]:
     return current
 
 
+def _run_agent_llm_config() -> None:
+    """Interactive per-agent LLM overrides; writes ~/.mw4agent/agents/<agentId>/agent.json (llm key)."""
+    mgr = AgentManager()
+    mgr.ensure_main()
+    agents = mgr.list_agents()
+    if not agents:
+        agents = ["main"]
+
+    agent_id = ""
+    try:
+        import questionary
+
+        picked = questionary.select(
+            "Which agent's LLM do you want to configure? (↑/↓ move, Enter confirm)",
+            choices=agents,
+            default=agents[0],
+        ).ask()
+        if picked:
+            agent_id = str(picked).strip()
+    except Exception:
+        pass
+    if not agent_id:
+        agent_id = click.prompt("Agent id", default=agents[0], show_default=True).strip()
+    agent_id = normalize_agent_id(agent_id)
+
+    cfg = mgr.get_or_create(agent_id)
+    llm = dict(cfg.llm or {})
+    root = read_root_config()
+    g_llm = root.get("llm") if isinstance(root.get("llm"), dict) else {}
+    g_llm = dict(g_llm)
+
+    click.echo("")
+    click.echo(f"Configure LLM for agent: {agent_id}")
+    if llm:
+        click.echo("Current per-agent LLM overrides:")
+        click.echo(f"  provider : {llm.get('provider') or '(not set)'}")
+        mid = llm.get("model_id") or llm.get("model")
+        click.echo(f"  model_id : {mid or '(not set)'}")
+        if llm.get("base_url"):
+            click.echo(f"  base_url : {llm.get('base_url')}")
+        if llm.get("api_key"):
+            click.echo("  api_key : ********")
+    else:
+        click.echo("No per-agent LLM overrides yet (falls back to global config + env).")
+    click.echo("Global LLM (mw4agent.json), for reference:")
+    click.echo(f"  provider : {g_llm.get('provider') or '(not set)'}")
+    g_mid = g_llm.get("model_id") or g_llm.get("model")
+    click.echo(f"  model_id : {g_mid or '(not set)'}")
+    click.echo("")
+
+    default_prov = str(llm.get("provider") or g_llm.get("provider") or "").strip() or None
+    provider = _prompt_provider_list(default_prov)
+    if provider is None:
+        choices = _llm_provider_choices()
+        provider = click.prompt(
+            "Select provider",
+            type=click.Choice(choices, case_sensitive=False),
+            default=default_prov or "echo",
+            show_default=True,
+        )
+    provider = str(provider).strip().lower()
+
+    default_model = (
+        str(llm.get("model_id") or llm.get("model") or g_llm.get("model_id") or g_llm.get("model") or "").strip()
+        or "YOUR_MODEL_ID"
+    )
+    model_id = click.prompt("Model ID", default=default_model, show_default=True)
+    default_base_url = str(llm.get("base_url") or g_llm.get("base_url") or "").strip()
+    base_url = click.prompt(
+        "Base URL (leave empty to keep / use provider default)",
+        default=default_base_url,
+        show_default=bool(default_base_url),
+    ).strip() or None
+
+    existing_api_key = str(llm.get("api_key") or "").strip()
+    api_key_prompt_default = "********" if existing_api_key else ""
+    api_key_input = click.prompt(
+        "API Key (leave empty to keep current per-agent key; not set = unchanged)",
+        default=api_key_prompt_default,
+        show_default=bool(api_key_prompt_default),
+    ).strip()
+    if api_key_input == "********":
+        api_key: Optional[str] = existing_api_key or None
+    elif api_key_input:
+        api_key = api_key_input
+    else:
+        api_key = None
+
+    new_llm = dict(llm)
+    new_llm["provider"] = provider
+    new_llm["model_id"] = model_id.strip()
+    if base_url is not None:
+        new_llm["base_url"] = base_url
+    if api_key is not None:
+        new_llm["api_key"] = api_key
+
+    cfg.llm = new_llm
+    mgr.save(cfg)
+    agent_json = Path(resolve_agent_dir(agent_id)) / "agent.json"
+    click.echo(f"Agent LLM overrides saved to {agent_json}")
+
+
 def _run_interactive_wizard() -> None:
-    """Run an interactive configuration wizard: choose section (LLM / Channels) then configure."""
+    """Run an interactive configuration wizard: choose section (LLM / Agent LLM / Channels) then configure."""
     click.echo("MW4Agent configuration wizard")
     click.echo("")
 
@@ -274,6 +381,8 @@ def _run_interactive_wizard() -> None:
             current = _run_llm_config(current)
             write_root_config(current)
             click.echo(f"LLM configuration saved to {get_root_config_path()}")
+        elif section == "agent_llm":
+            _run_agent_llm_config()
         elif section == "channels":
             current = _run_channels_config(current)
             write_root_config(current)

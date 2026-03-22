@@ -1,6 +1,9 @@
 """Feishu channel plugin (Phase 1).
 
 当前仅实现出站文本消息，入站 webhook/事件在后续阶段补充。
+
+支持多应用：通过 channels.feishu.accounts 配置多个 app，每个可绑定不同 agent_id；
+Gateway 启动时会为每个账号注册独立插件（channel id 为 feishu:<name>）并挂载 webhook / 启动 WS。
 """
 
 from __future__ import annotations
@@ -16,7 +19,14 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from ..dock import ChannelDock
-from ..feishu_outbound import send_text as send_text_outbound
+from ..feishu_accounts import FeishuAccountResolved
+from ..feishu_outbound import (
+    TypingIndicatorState,
+    add_typing_indicator,
+    remove_typing_indicator,
+    send_text as send_text_outbound,
+)
+from ...feishu.client import FeishuConfig
 from ...log import get_logger
 from ..types import (
     ChannelCapabilities,
@@ -42,27 +52,128 @@ class FeishuChannel(ChannelPlugin):
         port: int = 8081,
         path: str = "/feishu/webhook",
         connection_mode: Literal["webhook", "websocket"] = "webhook",
+        *,
+        feishu_account: FeishuAccountResolved | None = None,
     ) -> None:
         caps = ChannelCapabilities(
             chat_types=("direct", "group", "channel", "thread"),
             native_commands=True,
             block_streaming=False,
         )
+
+        feishu_cfg: FeishuConfig | None
+        if feishu_account is not None:
+            plugin_id = feishu_account.plugin_channel_id
+            norm_path = (
+                feishu_account.webhook_path
+                if feishu_account.webhook_path.startswith("/")
+                else f"/{feishu_account.webhook_path}"
+            )
+            conn_mode = feishu_account.connection_mode  # type: ignore[assignment]
+            feishu_cfg = FeishuConfig(
+                app_id=feishu_account.app_id,
+                app_secret=feishu_account.app_secret,
+                api_base=feishu_account.api_base or "https://open.feishu.cn/open-apis",
+            )
+            default_agent = feishu_account.agent_id
+            enc = feishu_account.encrypt_key
+            vtok = feishu_account.verification_token
+            acct_key = feishu_account.account_key
+        else:
+            plugin_id = "feishu"
+            norm_path = path if path.startswith("/") else f"/{path}"
+            conn_mode = connection_mode
+            feishu_cfg = None
+            default_agent = "main"
+            enc = ""
+            vtok = ""
+            acct_key = "default"
+
         dock = ChannelDock(
-            id="feishu",
+            id=plugin_id,
             capabilities=caps,
-            # 群聊默认需要 @ 才触发，后续可以结合 mention 解析细化
             resolve_require_mention=lambda _acct: True,
         )
-        meta = ChannelMeta(id="feishu", label="Feishu", docs_path="/channels/feishu")
+        meta = ChannelMeta(id=plugin_id, label=f"Feishu ({acct_key})", docs_path="/channels/feishu")
 
         object.__setattr__(self, "host", host)
         object.__setattr__(self, "port", int(port))
-        norm_path = path if path.startswith("/") else f"/{path}"
         object.__setattr__(self, "path", norm_path)
-        object.__setattr__(self, "connection_mode", connection_mode)
+        object.__setattr__(self, "connection_mode", conn_mode)
 
-        super().__init__(id="feishu", meta=meta, capabilities=caps, dock=dock)
+        object.__setattr__(self, "_feishu_cfg", feishu_cfg)
+        object.__setattr__(self, "_plugin_channel_id", plugin_id)
+        object.__setattr__(self, "_default_agent_id", default_agent)
+        object.__setattr__(self, "_encrypt_key", enc)
+        object.__setattr__(self, "_verification_token", vtok)
+        object.__setattr__(self, "_account_key", acct_key)
+
+        super().__init__(id=plugin_id, meta=meta, capabilities=caps, dock=dock)
+
+    def _session_key_for_chat(self, chat_id: Optional[str]) -> str:
+        cid = chat_id or "unknown"
+        if self._plugin_channel_id == "feishu":
+            return f"feishu:{cid}"
+        return f"{self._plugin_channel_id}:{cid}"
+
+    def _build_inbound_context(
+        self,
+        *,
+        text: str,
+        chat_id: Optional[str],
+        chat_type_raw: str,
+        message_id: Optional[str],
+        thread_id: Optional[str],
+        sender_open_id: Optional[str],
+        raw_event: Any,
+    ) -> InboundContext:
+        if chat_type_raw in ("p2p", "private"):
+            ctx_chat_type = "direct"
+        elif chat_type_raw in ("group", "supergroup"):
+            ctx_chat_type = "group"
+        else:
+            ctx_chat_type = "channel"
+
+        if ctx_chat_type == "group":
+            was_mentioned = "@" in text or "＠" in text
+        else:
+            was_mentioned = True
+
+        command_authorized = True
+        session_chat_id = chat_id or "unknown"
+        session_key = self._session_key_for_chat(chat_id)
+        session_id = str(session_chat_id)
+
+        return InboundContext(
+            channel=self._plugin_channel_id,
+            text=text,
+            session_key=session_key,
+            session_id=session_id,
+            agent_id=self._default_agent_id,
+            chat_type=ctx_chat_type,  # type: ignore[arg-type]
+            was_mentioned=was_mentioned,
+            command_authorized=command_authorized,
+            sender_is_owner=False,
+            sender_id=str(sender_open_id) if sender_open_id else None,
+            sender_name=None,
+            to=None,
+            thread_id=str(thread_id) if thread_id else None,
+            timestamp_ms=None,
+            extra={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "thread_id": thread_id,
+                "sender_open_id": sender_open_id,
+                "raw_event": raw_event,
+                "feishu_account_key": self._account_key,
+            },
+        )
+
+    async def feishu_typing_begin(self, message_id: str) -> TypingIndicatorState:
+        return await add_typing_indicator(message_id, feishu_cfg=self._feishu_cfg)
+
+    async def feishu_typing_end(self, state: TypingIndicatorState) -> None:
+        await remove_typing_indicator(state, feishu_cfg=self._feishu_cfg)
 
     async def run_monitor(self, *, on_inbound: InboundHandler) -> None:
         """启动 Feishu 监控。
@@ -110,7 +221,6 @@ class FeishuChannel(ChannelPlugin):
             text = ""
 
             if message_type == "text":
-                # content 是 JSON 字符串：{"text": "..."}
                 try:
                     content_obj = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
                     if isinstance(content_obj, dict):
@@ -118,13 +228,11 @@ class FeishuChannel(ChannelPlugin):
                 except Exception:
                     text = str(raw_content)
             else:
-                # 非文本消息，先简单转成占位文本
                 text = f"[feishu:{message_type}]"
 
             if not text:
                 return JSONResponse(status_code=200, content={"code": 0, "msg": "empty_text"})
 
-            # 与 feishu-openclaw-plugin 一致：event.message.chat_id / message_id；兼容 snake_case / camelCase
             chat_id = (
                 msg.get("chat_id") or msg.get("chatId")
                 or event.get("chat_id") or event.get("chatId")
@@ -143,54 +251,16 @@ class FeishuChannel(ChannelPlugin):
             sender_id_obj = sender.get("sender_id") or {}
             sender_open_id = sender_id_obj.get("open_id")
 
-            # 映射 chat_type 到 InboundContext.chat_type
-            if chat_type in ("p2p", "private"):
-                ctx_chat_type = "direct"
-            elif chat_type in ("group", "supergroup"):
-                ctx_chat_type = "group"
-            else:
-                ctx_chat_type = "channel"
-
-            # mention & command 简易解析：
-            # - 直聊：默认视为已提及
-            # - 群聊：如果文本中出现 "@" 或 "＠" 字符，则视为已提及；否则认为未提及
-            if ctx_chat_type == "group":
-                was_mentioned = "@" in text or "＠" in text
-            else:
-                was_mentioned = True
-
-            # Phase 3 先不做细粒度指令/权限控制，全部视为已授权
-            command_authorized = True
-
-            session_chat_id = chat_id or "unknown"
-            session_key = f"feishu:{session_chat_id}"
-            session_id = str(session_chat_id)
-
-            ctx = InboundContext(
-                channel="feishu",
+            ctx = self._build_inbound_context(
                 text=text,
-                session_key=session_key,
-                session_id=session_id,
-                agent_id="main",
-                chat_type=ctx_chat_type,  # type: ignore[arg-type]
-                was_mentioned=was_mentioned,
-                command_authorized=command_authorized,
-                sender_is_owner=False,
-                sender_id=str(sender_open_id) if sender_open_id else None,
-                sender_name=None,
-                to=None,
-                thread_id=str(thread_id) if thread_id else None,
-                timestamp_ms=None,
-                extra={
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "thread_id": thread_id,
-                    "sender_open_id": sender_open_id,
-                    "raw_event": body,
-                },
+                chat_id=chat_id,
+                chat_type_raw=str(chat_type),
+                message_id=message_id,
+                thread_id=thread_id,
+                sender_open_id=sender_open_id,
+                raw_event=body,
             )
 
-            # 不阻塞 HTTP 请求，将处理交给 dispatcher
             asyncio.create_task(on_inbound(ctx))
 
             return JSONResponse(content={"code": 0, "msg": "ok"})
@@ -211,14 +281,7 @@ class FeishuChannel(ChannelPlugin):
         await loop.run_in_executor(None, _run_server)
 
     async def _run_ws_monitor(self, *, on_inbound: InboundHandler) -> None:
-        """使用官方 SDK (lark-oapi) 建立 WebSocket 长连接并转发事件。
-
-        要求环境变量：
-        - FEISHU_APP_ID
-        - FEISHU_APP_SECRET
-        - FEISHU_ENCRYPT_KEY（若未加密，可留空）
-        - FEISHU_VERIFICATION_TOKEN
-        """
+        """使用官方 SDK (lark-oapi) 建立 WebSocket 长连接并转发事件。"""
         try:
             import lark_oapi as lark  # type: ignore[import-not-found]
         except ImportError as exc:  # pragma: no cover - 环境缺少依赖时的保护
@@ -227,19 +290,26 @@ class FeishuChannel(ChannelPlugin):
                 "请先运行: pip install lark-oapi"
             ) from exc
 
-        app_id = os.getenv("FEISHU_APP_ID")
-        app_secret = os.getenv("FEISHU_APP_SECRET")
-        if not app_id or not app_secret:
-            try:
-                from mw4agent.config import read_root_section
-                channels = read_root_section("channels", default={})
-                feishu_cfg = channels.get("feishu") or {}
-                app_id = app_id or (feishu_cfg.get("app_id") or "").strip()
-                app_secret = app_secret or (feishu_cfg.get("app_secret") or "").strip()
-            except Exception:
-                pass
-        encrypt_key = os.getenv("FEISHU_ENCRYPT_KEY", "") or ""
-        verification_token = os.getenv("FEISHU_VERIFICATION_TOKEN", "") or ""
+        app_id: Optional[str] = None
+        app_secret: Optional[str] = None
+        if self._feishu_cfg is not None:
+            app_id = self._feishu_cfg.app_id
+            app_secret = self._feishu_cfg.app_secret
+        else:
+            app_id = os.getenv("FEISHU_APP_ID")
+            app_secret = os.getenv("FEISHU_APP_SECRET")
+            if not app_id or not app_secret:
+                try:
+                    from mw4agent.config import read_root_section
+                    channels = read_root_section("channels", default={})
+                    feishu_cfg = channels.get("feishu") or {}
+                    app_id = app_id or (feishu_cfg.get("app_id") or "").strip()
+                    app_secret = app_secret or (feishu_cfg.get("app_secret") or "").strip()
+                except Exception:
+                    pass
+
+        encrypt_key = self._encrypt_key or os.getenv("FEISHU_ENCRYPT_KEY", "") or ""
+        verification_token = self._verification_token or os.getenv("FEISHU_VERIFICATION_TOKEN", "") or ""
 
         if not app_id or not app_secret:
             raise RuntimeError(
@@ -249,7 +319,6 @@ class FeishuChannel(ChannelPlugin):
         loop = asyncio.get_running_loop()
 
         def _handle_im_message(data: Any) -> None:
-            """处理 P2ImMessageReceiveV1 事件，转换为 InboundContext."""
             try:
                 event = getattr(data, "event", None)
                 if event is None:
@@ -295,69 +364,32 @@ class FeishuChannel(ChannelPlugin):
                     if sender_id_obj is not None:
                         sender_open_id = getattr(sender_id_obj, "open_id", None)
 
-                # 映射 chat_type 到 InboundContext.chat_type
-                if chat_type in ("p2p", "private"):
-                    ctx_chat_type = "direct"
-                elif chat_type in ("group", "supergroup"):
-                    ctx_chat_type = "group"
-                else:
-                    ctx_chat_type = "channel"
-
-                if ctx_chat_type == "group":
-                    was_mentioned = "@" in text or "＠" in text
-                else:
-                    was_mentioned = True
-
-                command_authorized = True
-
-                session_chat_id = chat_id or "unknown"
-                session_key = f"feishu:{session_chat_id}"
-                session_id = str(session_chat_id)
-
-                ctx = InboundContext(
-                    channel="feishu",
+                ctx = self._build_inbound_context(
                     text=text,
-                    session_key=session_key,
-                    session_id=session_id,
-                    agent_id="main",
-                    chat_type=ctx_chat_type,  # type: ignore[arg-type]
-                    was_mentioned=was_mentioned,
-                    command_authorized=command_authorized,
-                    sender_is_owner=False,
-                    sender_id=str(sender_open_id) if sender_open_id else None,
-                    sender_name=None,
-                    to=None,
-                    thread_id=str(thread_id) if thread_id else None,
-                    timestamp_ms=None,
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "thread_id": thread_id,
-                        "sender_open_id": sender_open_id,
-                        "raw_event": lark.JSON.marshal(data),
-                    },
+                    chat_id=chat_id,
+                    chat_type_raw=str(chat_type),
+                    message_id=message_id,
+                    thread_id=thread_id,
+                    sender_open_id=sender_open_id,
+                    raw_event=lark.JSON.marshal(data),
                 )
 
                 asyncio.run_coroutine_threadsafe(on_inbound(ctx), loop)
             except Exception as e:  # pragma: no cover - 日志路径
                 print(f"[Feishu WS] error handling message event: {e}")
 
-        # 构建事件分发器（_handle_im_message 内用 run_coroutine_threadsafe 回主 loop，无需改）
         event_handler = (
             lark.EventDispatcherHandler.builder(encrypt_key, verification_token)
             .register_p2_im_message_receive_v1(_handle_im_message)
             .build()
         )
 
-        # lark-oapi 在模块加载时固定了全局 loop，且 Client.start() 里用 loop.run_until_complete()。
-        # 若在 run_in_executor 的线程里直接 start()，用的仍是主线程已运行的 loop → RuntimeError: this event loop is already running.
-        # 做法：在 WS 线程内新建并设置该线程的 event loop，并让 lark_oapi.ws.client 使用该 loop，且在该线程内创建 Client（Lock 等绑定到该 loop），再 start()。
         def _run_ws() -> None:
             ws_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(ws_loop)
             try:
                 import lark_oapi.ws.client as ws_client_mod
-                ws_client_mod.loop = ws_loop  # 使 Client.start() 使用本线程的 loop
+                ws_client_mod.loop = ws_loop
                 ws_client = lark.ws.Client(
                     app_id,
                     app_secret,
@@ -371,10 +403,7 @@ class FeishuChannel(ChannelPlugin):
         await loop.run_in_executor(None, _run_ws)
 
     async def deliver(self, payload: OutboundPayload) -> None:
-        """Send outbound payload to Feishu.
-
-        Phase 1: 仅支持文本消息。chat_id 优先从 inbound.extra 取，缺省时用 inbound.session_id（feishu 下即会话 chat_id）回退。
-        """
+        """Send outbound payload to Feishu."""
         inbound = None
         if isinstance(payload.extra, dict):
             inbound = payload.extra.get("inbound")
@@ -392,7 +421,6 @@ class FeishuChannel(ChannelPlugin):
                 thread_id = extra.get("thread_id") or extra.get("threadId")
             session_id = inbound.get("session_id")
 
-        # 与 feishu-openclaw-plugin 一致：session 即 chat_id 时可用作回退
         if not chat_id and session_id and str(session_id).strip() and str(session_id) != "unknown":
             chat_id = str(session_id).strip()
 
@@ -412,8 +440,8 @@ class FeishuChannel(ChannelPlugin):
                 reply_to_id=reply_to_id,
                 thread_id=thread_id,
                 mentions=None,
+                feishu_cfg=self._feishu_cfg,
             )
         except Exception as e:
             logger.exception("[feishu] deliver failed: %s", e)
             raise
-

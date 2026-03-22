@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../openclaw"
+		},
+		{
+			"path": "../../../clawbot-plugins/feishu-openclaw-plugin"
+		},
+		{
+			"path": "../../claude-code"
+		},
+		{
+			"path": "../../mem0"
+		}
+	],
+	"settings": {}
+}
