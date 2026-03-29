@@ -10,7 +10,7 @@ import time
 @dataclass
 class StreamEvent:
     """Stream event"""
-    stream: str  # "assistant" | "tool" | "lifecycle"
+    stream: str  # "assistant" | "tool" | "lifecycle" | "llm"
     type: str  # event type
     data: Dict[str, Any]
     timestamp: int = 0

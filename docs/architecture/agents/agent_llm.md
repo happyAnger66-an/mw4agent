@@ -225,6 +225,40 @@ body = {
 - `OPENAI_API_KEY`：
   - 使用 OpenAI 后端时必须设置
 
+### 6.1 thinking 模式开关（按 provider 注入）
+
+`AgentRunParams.thinking_level` 用于控制“模型端思考模式”是否开启。该字段不会直接决定前端展示；前端展示由 `reasoning_level` 控制。
+
+`thinking_level` 的解析优先级（高到低）：
+
+1. `AgentRunParams.thinking_level`
+2. `~/.mw4agent/agents/<agentId>/agent.json` 的 `llm.thinking_level` / `llm.thinkingLevel`
+3. `~/.mw4agent/mw4agent.json` 的 `llm.thinking_level` / `llm.thinkingLevel`
+4. 环境变量 `MW4AGENT_LLM_THINKING_LEVEL`
+5. 默认 `off`
+
+支持值：`off` | `minimal` | `low` | `medium` | `high` | `xhigh` | `adaptive`（兼容：`on -> medium`）。
+
+当 `thinking_level != off` 时，请求体会按 provider 注入不同参数：
+
+| Provider | 注入字段 | 说明 |
+|---|---|---|
+| `openai` / `deepseek` | `reasoning_effort` | 映射到 `low`/`medium`/`high` |
+| `vllm` / `aliyun-bailian` | `reasoning: { effort }` | 映射到 `minimal`/`low`/`medium`/`high`（`xhigh` 会降级为 `high`） |
+| 其他 provider | 不注入 | 保持兼容，不强加未知字段 |
+
+配置示例（`~/.mw4agent/mw4agent.json`）：
+
+```json
+{
+  "llm": {
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "thinkingLevel": "medium"
+  }
+}
+```
+
 ## 7. 使用示例
 
 ### 7.1 直接调用 AgentRunner

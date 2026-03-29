@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from .base import AgentTool, ToolResult
+from .timeout_defaults import resolve_timeout_ms_param
 
 
 def _ensure_under_root(resolved: str, root: str) -> None:
@@ -94,7 +95,7 @@ class ProcessTool(AgentTool):
         if action == "status":
             return self._status(params)
         if action == "stop":
-            return await self._stop(params)
+            return await self._stop(params, context)
         return self._list()
 
     async def _start(self, params: Dict[str, Any], workspace_dir: str, workspace_only: bool) -> ToolResult:
@@ -171,7 +172,7 @@ class ProcessTool(AgentTool):
             },
         )
 
-    async def _stop(self, params: Dict[str, Any]) -> ToolResult:
+    async def _stop(self, params: Dict[str, Any], context: Optional[Dict[str, Any]]) -> ToolResult:
         process_id = str(params.get("process_id") or "").strip()
         if not process_id:
             return ToolResult(success=False, result={}, error="process: process_id is required for stop")
@@ -179,12 +180,14 @@ class ProcessTool(AgentTool):
         if rec is None:
             return ToolResult(success=False, result={}, error=f"process: process_id not found: {process_id}")
 
-        stop_timeout_ms = params.get("stop_timeout_ms", 3000)
-        try:
-            stop_timeout_ms = int(stop_timeout_ms)
-        except (TypeError, ValueError):
-            stop_timeout_ms = 3000
-        stop_timeout_ms = max(100, min(stop_timeout_ms, 20000))
+        stop_timeout_ms = resolve_timeout_ms_param(
+            params,
+            context,
+            param_key="stop_timeout_ms",
+            default_ms=3000,
+            min_ms=100,
+            max_ms=20000,
+        )
 
         if rec.proc.returncode is None:
             try:

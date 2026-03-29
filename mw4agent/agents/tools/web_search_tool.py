@@ -180,10 +180,19 @@ def _auto_select_provider(cfg: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _resolve_timeout_s(cfg: Dict[str, Any]) -> int:
+def _resolve_timeout_s(cfg: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> int:
     v = cfg.get("timeoutSeconds") or cfg.get("timeout_seconds")
     if isinstance(v, int) and v > 0:
         return v
+    if context:
+        raw = context.get("default_tool_timeout_ms")
+        if raw is not None:
+            try:
+                ms = int(raw)
+                if ms > 0:
+                    return max(1, (ms + 999) // 1000)
+            except (TypeError, ValueError):
+                pass
     return DEFAULT_TIMEOUT_S
 
 
@@ -419,7 +428,7 @@ class WebSearchTool(AgentTool):
         search_lang = _read_str(params, "search_lang")
         ui_lang = _read_str(params, "ui_lang")
 
-        timeout_s = _resolve_timeout_s(cfg)
+        timeout_s = _resolve_timeout_s(cfg, context)
         ttl_s = _resolve_cache_ttl_s(cfg)
         key = _cache_key(
             provider=provider,

@@ -4,7 +4,7 @@
 
 - RPC `agent`：触发一次智能体 run（立即返回 accepted + runId）
 - RPC `agent.wait`：等待 run 的 lifecycle 终态（ok/error/timeout）
-- WebSocket `/ws`：广播 agent 的事件流（lifecycle/assistant/tool）
+- WebSocket `/ws`：广播 agent 的事件流（lifecycle/assistant/tool/llm）
 
 并说明其内部状态机（dedupe、run registry）与 `AgentRunner` 的桥接方式。
 
@@ -90,7 +90,7 @@
 ```json
 {
   "run_id": "uuid",
-  "stream": "lifecycle|assistant|tool",
+  "stream": "lifecycle|assistant|tool|llm",
   "data": { ... },
   "seq": 1,
   "ts": 1710000000000
@@ -102,6 +102,7 @@
 - `lifecycle`：`phase=start|end|error`
 - `assistant`：`type=delta`（来自 `AgentRunner` 的占位实现）
 - `tool`：暂未触发（后续接入真实 tools loop 时会自然产生）
+- `llm`：`type=message`，包含结构化模型输出（如 `thinking`、`content`、`tool_calls`、`usage`）
 
 ## 3. 内部架构与关键逻辑
 

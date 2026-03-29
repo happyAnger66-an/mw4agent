@@ -25,6 +25,7 @@ from ..session.manager import SessionManager
 from ..tools.registry import get_tool_registry
 from ..tools.base import ToolResult
 from ..tools.policy import resolve_tool_policy_config, resolve_effective_policy_for_context, filter_tools_by_policy, resolve_effective_allow_patterns
+from ..tools.timeout_defaults import resolve_default_tool_timeout_ms
 from ..tools.fs_policy import resolve_tool_fs_policy_config
 from ..queue.manager import CommandQueue
 from ..events.stream import EventStream
@@ -52,7 +53,7 @@ from ..session.transcript import (
 )
 from ..tools.web_search_tool import is_web_search_enabled
 
-MAX_TOOL_ROUNDS = 16
+MAX_TOOL_ROUNDS = 30
 TOOL_PROCESSING_START_SEC = 30.0
 TOOL_PROCESSING_INTERVAL_SEC = 60.0
 
@@ -204,6 +205,66 @@ class AgentRunner:
         self.tool_registry = get_tool_registry()
         self._active_runs: Dict[str, Any] = {}
 
+    async def _emit_llm_response_message(
+        self,
+        run_id: str,
+        params: AgentRunParams,
+        *,
+        phase: str,
+        round_index: Optional[int],
+        raw_content: Optional[str],
+        tool_calls: Optional[List[Dict[str, Any]]],
+        provider: str,
+        model: str,
+        usage: LLMUsage,
+    ) -> None:
+        """Emit structured LLM output on stream ``llm`` (thinking, visible text, tool plan)."""
+        reasoning, text_only = split_reasoning_and_text(raw_content or "")
+        tc_summary: Optional[List[Dict[str, str]]] = None
+        if tool_calls:
+            tc_summary = []
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                name = tc.get("name")
+                args = tc.get("arguments")
+                prev = ""
+                if isinstance(args, dict):
+                    prev = json.dumps(args, ensure_ascii=False)[:400]
+                elif args is not None:
+                    prev = str(args)[:400]
+                tc_summary.append({"name": str(name or ""), "arguments_preview": prev})
+            if not tc_summary:
+                tc_summary = None
+        usage_payload: Dict[str, int] = {}
+        if isinstance(usage, LLMUsage):
+            if usage.input_tokens is not None:
+                usage_payload["input"] = int(usage.input_tokens)
+            if usage.output_tokens is not None:
+                usage_payload["output"] = int(usage.output_tokens)
+            if usage.total_tokens is not None:
+                usage_payload["total"] = int(usage.total_tokens)
+        await self.event_stream.emit(
+            StreamEvent(
+                stream="llm",
+                type="message",
+                data={
+                    "run_id": run_id,
+                    "session_id": params.session_id,
+                    "session_key": params.session_key,
+                    "agent_id": params.agent_id,
+                    "phase": phase,
+                    "round": round_index,
+                    "provider": provider,
+                    "model": model,
+                    "thinking": reasoning if reasoning.strip() else None,
+                    "content": text_only if text_only.strip() else None,
+                    "tool_calls": tc_summary,
+                    "usage": usage_payload or None,
+                },
+            )
+        )
+
     async def run(
         self,
         params: AgentRunParams,
@@ -269,6 +330,7 @@ class AgentRunner:
                         "session_id": session_id,
                         "status": "completed",
                         "agent_id": params.agent_id,
+                        "stop_reason": result.meta.stop_reason,
                     },
                 )
             )
@@ -382,6 +444,7 @@ class AgentRunner:
             tool_plan = None
 
         logger.info(f"--> agent_turn start ")
+        turn_stop_reason: Optional[str] = None
         if tool_plan is not None:
             tool_name = _normalize_tool_name(str(tool_plan["tool_name"]))
             logger.info(f"  ----> agent_turn tool_name: {tool_name}")
@@ -419,6 +482,7 @@ class AgentRunner:
                 "tools_allow": resolve_effective_allow_patterns(effective_policy),
                 "tools_deny": effective_policy.deny,
                 "tools_fs_workspace_only": fs_policy.workspace_only,
+                "default_tool_timeout_ms": resolve_default_tool_timeout_ms(),
             }
             tool_result = await self.execute_tool(
                 tool_call_id=tool_call_id,
@@ -453,6 +517,17 @@ class AgentRunner:
             llm_params = replace(params_for_llm, message=composed_with_skills)
             await asyncio.sleep(0)
             reply_text, provider, model, usage = generate_reply(llm_params)
+            await self._emit_llm_response_message(
+                run_id,
+                params,
+                phase="tool_plan",
+                round_index=None,
+                raw_content=reply_text,
+                tool_calls=None,
+                provider=provider,
+                model=model,
+                usage=usage,
+            )
         else:
             # No tool plan → try tool-call loop if we have tools and non-echo provider.
             from ...config import get_default_config_manager
@@ -538,12 +613,13 @@ class AgentRunner:
                 "tools_allow": resolve_effective_allow_patterns(effective_policy),
                 "tools_deny": effective_policy.deny,
                 "tools_fs_workspace_only": fs_policy.workspace_only,
+                "default_tool_timeout_ms": resolve_default_tool_timeout_ms(),
             }
             use_tool_loop = bool(tool_definitions)
             if use_tool_loop:
                 logger.info(
                     f"  --> llm return use_tool_loop: {use_tool_loop}, tool_context: {tool_context}")
-                reply_text, provider, model, usage = await self._run_tool_loop(
+                reply_text, provider, model, usage, turn_stop_reason = await self._run_tool_loop(
                     params_for_llm,
                     tool_definitions,
                     tool_context,
@@ -567,6 +643,17 @@ class AgentRunner:
 
                 reply_text, provider, model, usage = generate_reply(
                     params_for_llm, messages=messages
+                )
+                await self._emit_llm_response_message(
+                    run_id,
+                    params,
+                    phase="single_turn",
+                    round_index=None,
+                    raw_content=reply_text,
+                    tool_calls=None,
+                    provider=provider,
+                    model=model,
+                    usage=usage,
                 )
 
                 # Persist transcript: user + assistant.
@@ -635,7 +722,7 @@ class AgentRunner:
             if usage.total_tokens is not None:
                 usage_dict["total"] = int(usage.total_tokens)
 
-        payload = AgentPayload(text=reply_text)
+        payload = AgentPayload(text=text_only)
 
         return AgentRunResult(
             payloads=[payload],
@@ -645,6 +732,7 @@ class AgentRunner:
                 provider=provider,
                 model=model,
                 usage=usage_dict,
+                stop_reason=turn_stop_reason,
             ),
         )
 
@@ -660,8 +748,13 @@ class AgentRunner:
         transcript_session_id: Optional[str] = None,
         transcript_cwd: str = "",
     ) -> tuple:
-        # Returns (reply_text: str, provider: str, model: str, usage: LLMUsage)
-        """Run LLM with tools in a loop until no tool_calls or max rounds. Returns (reply_text, provider, model, usage)."""
+        # Returns (reply_text, provider, model, usage, tool_loop_stop_reason)
+        """Run LLM with tools in a loop until no tool_calls or max rounds.
+
+        If the loop exits because the last allowed round still requested tools,
+        runs one final text-only LLM turn and sets ``tool_loop_stop_reason`` to
+        ``\"max_tool_rounds\"``.
+        """
         logger.info(f"    ----> run_tool_loop tool_loop start: {tool_context}")
         messages: List[Dict[str, Any]] = []
         if params.extra_system_prompt:
@@ -685,12 +778,29 @@ class AgentRunner:
         provider = "echo"
         model = ""
         usage = LLMUsage()
-        for _ in range(MAX_TOOL_ROUNDS):
+        tool_loop_stop_reason: Optional[str] = None
+        for round_idx in range(MAX_TOOL_ROUNDS):
             await asyncio.sleep(0)
             content, tool_calls, provider, model, usage = generate_reply_with_tools(
                 params, messages, tool_definitions
             )
-            logger.info(f"      ----> run_tool_loop {_} tool_calls: {tool_calls} content: {content}")
+            logger.info(
+                "      ----> run_tool_loop %s tool_calls: %s content: %s",
+                round_idx,
+                tool_calls,
+                content,
+            )
+            await self._emit_llm_response_message(
+                run_id,
+                params,
+                phase="tool_loop",
+                round_index=round_idx,
+                raw_content=content,
+                tool_calls=tool_calls if tool_calls else None,
+                provider=provider,
+                model=model,
+                usage=usage,
+            )
             if not tool_calls:
                 reply_text = content or ""
                 if transcript_file and transcript_session_id:
@@ -773,7 +883,40 @@ class AgentRunner:
                         cwd=transcript_cwd,
                         messages=[{"role": "tool", "tool_call_id": tid, "content": result_str}],
                     )
-        return (reply_text, provider, model, usage)
+            if round_idx == MAX_TOOL_ROUNDS - 1:
+                tool_loop_stop_reason = "max_tool_rounds"
+
+        if tool_loop_stop_reason == "max_tool_rounds":
+            cap_note = (
+                f"[System] The tool-call loop reached its safety limit ({MAX_TOOL_ROUNDS} rounds). "
+                "Summarize what was accomplished, what is still incomplete, and suggest concrete next steps. "
+                "Use the same language as the user when possible. Do not propose further tool calls."
+            )
+            messages.append({"role": "system", "content": cap_note})
+            final_text, provider2, model2, usage2 = generate_reply(params, messages=messages)
+            reply_text = (final_text or "").strip()
+            provider, model = provider2, model2
+            usage = _merge_llm_usage(usage, usage2)
+            await self._emit_llm_response_message(
+                run_id,
+                params,
+                phase="tool_loop_finalize",
+                round_index=None,
+                raw_content=reply_text,
+                tool_calls=None,
+                provider=provider2,
+                model=model2,
+                usage=usage2,
+            )
+            if transcript_file and transcript_session_id:
+                append_transcript_messages(
+                    transcript_file=transcript_file,
+                    session_id=transcript_session_id,
+                    cwd=transcript_cwd,
+                    messages=[{"role": "assistant", "content": reply_text}],
+                )
+
+        return (reply_text, provider, model, usage, tool_loop_stop_reason)
 
     async def execute_tool(
         self,

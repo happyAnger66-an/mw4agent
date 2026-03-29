@@ -31,6 +31,7 @@ from ..memory.bootstrap import load_bootstrap_system_prompt
 from ..plugin import load_plugins
 from .state import DedupeEntry, GatewayState, RunSnapshot
 from .types import AgentEvent
+from .wait_timeout import resolve_agent_wait_timeout_ms
 
 logger = get_logger(__name__)
 
@@ -232,6 +233,7 @@ def create_app(
                         seq=rec.seq,
                     )
                 )
+                sr = evt.data.get("stop_reason")
                 state.mark_run_terminal(
                     run_id,
                     RunSnapshot(
@@ -240,6 +242,7 @@ def create_app(
                         started_at=rec.started_at_ms,
                         ended_at=int(ended_at),
                         reply_text=rec.reply_text_buffer.strip() if rec.reply_text_buffer else None,
+                        stop_reason=str(sr).strip() if sr else None,
                     ),
                 )
                 return
@@ -263,6 +266,7 @@ def create_app(
                         ended_at=int(ended_at),
                         error=error,
                         reply_text=rec.reply_text_buffer.strip() if rec.reply_text_buffer else None,
+                        stop_reason=None,
                     ),
                 )
                 return
@@ -293,9 +297,21 @@ def create_app(
             )
             return
 
+        if evt.stream == "llm":
+            await state.broadcast(
+                AgentEvent(
+                    run_id=run_id,
+                    stream="llm",
+                    data={"type": evt.type, **evt.data},
+                    seq=rec.seq,
+                )
+            )
+            return
+
     runner.event_stream.subscribe("lifecycle", handle_agent_stream_event)
     runner.event_stream.subscribe("assistant", handle_agent_stream_event)
     runner.event_stream.subscribe("tool", handle_agent_stream_event)
+    runner.event_stream.subscribe("llm", handle_agent_stream_event)
 
     # Expose in app.state for handlers
     app.state.gateway_state = state
@@ -566,10 +582,7 @@ def create_app(
             timeout_ms = params.get("timeoutMs")
             if not run_id:
                 return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "runId required"}}
-            try:
-                timeout_ms_int = int(timeout_ms) if timeout_ms is not None else 30_000
-            except Exception:
-                timeout_ms_int = 30_000
+            timeout_ms_int = resolve_agent_wait_timeout_ms(timeout_ms)
             timeout_ms_int = max(0, timeout_ms_int)
 
             rec = state.runs.get(run_id)
@@ -585,6 +598,7 @@ def create_app(
                         "endedAt": snap.ended_at,
                         "error": snap.error,
                         "replyText": snap.reply_text,
+                        "stopReason": snap.stop_reason,
                     },
                 }
 
@@ -610,6 +624,7 @@ def create_app(
                     "endedAt": snap.ended_at,
                     "error": snap.error,
                     "replyText": snap.reply_text,
+                    "stopReason": snap.stop_reason,
                 },
             }
 

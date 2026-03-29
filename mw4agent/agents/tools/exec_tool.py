@@ -15,6 +15,7 @@ import signal
 from typing import Any, Dict, Optional
 
 from .base import AgentTool, ToolResult
+from .timeout_defaults import resolve_timeout_ms_param
 
 
 def _ensure_under_root(resolved: str, root: str) -> None:
@@ -47,7 +48,7 @@ class ExecTool(AgentTool):
                     },
                     "timeout_ms": {
                         "type": "integer",
-                        "description": "Optional timeout in milliseconds (default: 10000, max: 120000).",
+                        "description": "Optional timeout in milliseconds (default: 10000 or tools.timeout_ms in config, max: 120000).",
                     },
                     "max_output_chars": {
                         "type": "integer",
@@ -89,12 +90,14 @@ class ExecTool(AgentTool):
             except PermissionError as e:
                 return ToolResult(success=False, result={}, error=str(e))
 
-        timeout_ms = params.get("timeout_ms", 10000)
-        try:
-            timeout_ms = int(timeout_ms)
-        except (TypeError, ValueError):
-            timeout_ms = 10000
-        timeout_ms = max(100, min(timeout_ms, 120000))
+        timeout_ms = resolve_timeout_ms_param(
+            params,
+            context,
+            param_key="timeout_ms",
+            default_ms=10000,
+            min_ms=100,
+            max_ms=120000,
+        )
 
         max_output_chars = params.get("max_output_chars", 12000)
         try:

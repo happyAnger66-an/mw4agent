@@ -59,6 +59,7 @@ class FeishuChannel(ChannelPlugin):
             chat_types=("direct", "group", "channel", "thread"),
             native_commands=True,
             block_streaming=False,
+            subscribe_llm_stream=True,
         )
 
         feishu_cfg: FeishuConfig | None

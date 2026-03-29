@@ -28,6 +28,7 @@ class RunSnapshot:
     ended_at: Optional[int] = None
     error: Optional[str] = None
     reply_text: Optional[str] = None  # Accumulated assistant reply text
+    stop_reason: Optional[str] = None  # e.g. max_tool_rounds from AgentRunMeta.stop_reason
 
 
 @dataclass

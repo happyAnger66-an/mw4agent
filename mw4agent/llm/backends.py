@@ -95,6 +95,79 @@ def _first_non_empty_str(*candidates: Optional[Any]) -> str:
     return ""
 
 
+def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _extract_text_and_reasoning_from_message(
+    msg: Dict[str, Any],
+    *,
+    choice: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str]:
+    """Extract visible content and reasoning from OpenAI-compatible payload.
+
+    Covers common OpenAI-compatible variants and Qwen-specific ``reasoning_content``.
+    """
+    visible_parts: List[str] = []
+    reasoning_parts: List[str] = []
+
+    content = msg.get("content")
+    if isinstance(content, str):
+        visible_parts.append(content)
+    elif isinstance(content, list):
+        for item in content:
+            if isinstance(item, str):
+                visible_parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            itype = str(item.get("type") or "").strip().lower()
+            txt = _as_text(
+                item.get("reasoning_content")
+                or item.get("text")
+                or item.get("content")
+            )
+            if itype in ("reasoning", "thinking", "reasoning_content"):
+                if txt.strip():
+                    reasoning_parts.append(txt)
+                continue
+            if txt.strip():
+                visible_parts.append(txt)
+
+    top_reason = msg.get("reasoning_content") or msg.get("reasoning") or msg.get("thinking")
+    top_reason_text = _as_text(top_reason).strip()
+    if top_reason_text:
+        reasoning_parts.append(top_reason_text)
+    if isinstance(choice, dict):
+        choice_reason = _as_text(
+            choice.get("reasoning_content")
+            or choice.get("reasoning")
+            or choice.get("thinking")
+        ).strip()
+        if choice_reason:
+            reasoning_parts.append(choice_reason)
+
+    visible = "\n".join(p for p in visible_parts if _as_text(p).strip()).strip()
+    reasoning = "\n".join(p for p in reasoning_parts if _as_text(p).strip()).strip()
+    return visible, reasoning
+
+
+def _merge_reasoning_into_content(content: str, reasoning: str) -> str:
+    c = (content or "").strip()
+    r = (reasoning or "").strip()
+    if not r:
+        return c
+    if "<think" in c.lower():
+        return c
+    if c:
+        return f"<think>{r}</think>\n{c}"
+    return f"<think>{r}</think>"
+
+
 def _load_agent_llm_overrides(agent_id: Optional[str]) -> Dict[str, Any]:
     """Per-agent llm fragment from ~/.mw4agent/agents/<agentId>/agent.json (key \"llm\")."""
     try:
@@ -110,7 +183,52 @@ def _load_agent_llm_overrides(agent_id: Optional[str]) -> Dict[str, Any]:
         return {}
 
 
-def _resolve_llm_settings(params: AgentRunParams) -> Tuple[str, str, Optional[str], Optional[str]]:
+def _normalize_thinking_level(raw: Optional[Any]) -> str:
+    s = str(raw or "").strip().lower()
+    if s in ("", "off", "false", "0", "none"):
+        return "off"
+    if s in ("on", "true", "1"):
+        return "medium"
+    if s in ("minimal", "low", "medium", "high", "xhigh", "adaptive"):
+        return s
+    return "off"
+
+
+def _resolve_reasoning_effort_for_provider(provider: str, thinking_level: str) -> Optional[str]:
+    lvl = _normalize_thinking_level(thinking_level)
+    if lvl == "off":
+        return None
+    p = (provider or "").strip().lower()
+    if p in ("openai", "deepseek"):
+        if lvl in ("minimal", "low"):
+            return "low"
+        if lvl in ("high", "xhigh"):
+            return "high"
+        return "medium"
+    if p in ("vllm", "aliyun-bailian"):
+        if lvl in ("minimal", "low", "medium", "high"):
+            return lvl
+        if lvl == "xhigh":
+            return "high"
+        return "medium"
+    return None
+
+
+def _thinking_extra_body(provider: str, thinking_level: str) -> Dict[str, Any]:
+    effort = _resolve_reasoning_effort_for_provider(provider, thinking_level)
+    if not effort:
+        return {}
+    p = (provider or "").strip().lower()
+    if p in ("openai", "deepseek"):
+        return {"reasoning_effort": effort}
+    if p in ("vllm", "aliyun-bailian"):
+        return {"reasoning": {"effort": effort}}
+    return {}
+
+
+def _resolve_llm_settings(
+    params: AgentRunParams,
+) -> Tuple[str, str, Optional[str], Optional[str], str]:
     """Resolve provider, model, base_url, api_key for this run.
 
     Precedence per field (first non-empty wins):
@@ -154,7 +272,18 @@ def _resolve_llm_settings(params: AgentRunParams) -> Tuple[str, str, Optional[st
     )
     api_key: Optional[str] = api_key_s if api_key_s else None
 
-    return provider, model, base_url, api_key
+    thinking_level = _normalize_thinking_level(
+        _first_non_empty_str(
+            params.thinking_level,
+            a.get("thinking_level"),
+            a.get("thinkingLevel"),
+            g.get("thinking_level"),
+            g.get("thinkingLevel"),
+            os.getenv("MW4AGENT_LLM_THINKING_LEVEL"),
+        )
+    )
+
+    return provider, model, base_url, api_key, thinking_level
 
 
 def _call_openai_chat(
@@ -164,6 +293,7 @@ def _call_openai_chat(
     model: str,
     api_key: str,
     base_url: str,
+    extra_body: Optional[Dict[str, Any]] = None,
     timeout_s: float = 30.0,
 ) -> Tuple[str, LLMUsage]:
     """Call an OpenAI-compatible Chat Completions API (minimal subset)."""
@@ -184,16 +314,17 @@ def _call_openai_chat(
         resolved_messages = [{"role": "user", "content": prompt}]
 
     body = {"model": model, "messages": resolved_messages, "temperature": 0.2}
+    if isinstance(extra_body, dict) and extra_body:
+        body.update(extra_body)
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url=url, data=data, method="POST", headers=headers)
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         raw = resp.read().decode("utf-8")
     obj = json.loads(raw)
-    text = (
-        obj.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-    )
+    choice = obj.get("choices", [{}])[0] or {}
+    msg = choice.get("message", {}) or {}
+    text, reasoning = _extract_text_and_reasoning_from_message(msg, choice=choice)
+    text = _merge_reasoning_into_content(text, reasoning)
     usage_obj = obj.get("usage") or {}
     usage = LLMUsage(
         input_tokens=usage_obj.get("prompt_tokens"),
@@ -230,6 +361,7 @@ def _call_openai_chat_with_tools(
     model: str,
     api_key: str,
     base_url: str,
+    extra_body: Optional[Dict[str, Any]] = None,
     timeout_s: float = 60.0,
 ) -> Tuple[Optional[str], List[ToolCallPayload], LLMUsage]:
     """Call OpenAI Chat Completions with tools. Returns (content, tool_calls, usage).
@@ -250,6 +382,8 @@ def _call_openai_chat_with_tools(
         "tools": tools,
         "temperature": 0.2,
     }
+    if isinstance(extra_body, dict) and extra_body:
+        body.update(extra_body)
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     logger.debug(f'llm request {url}')
     req = urllib.request.Request(url=url, data=data, method="POST", headers=headers)
@@ -259,9 +393,8 @@ def _call_openai_chat_with_tools(
     logger.debug(f'llm response {obj}')
     choice = obj.get("choices", [{}])[0] or {}
     msg = choice.get("message") or {}
-    content = msg.get("content")
-    if content is not None and not isinstance(content, str):
-        content = str(content)
+    content, reasoning = _extract_text_and_reasoning_from_message(msg, choice=choice)
+    content = _merge_reasoning_into_content(content, reasoning)
     # 部分 API 将 tool_calls 放在 choice 下而非 choice.message 下，兼容两种格式
     raw_tool_calls = msg.get("tool_calls") or choice.get("tool_calls") or []
     tool_calls: List[ToolCallPayload] = []
@@ -305,7 +438,7 @@ def generate_reply_with_tools(
     """One LLM round with tools. Returns (content, tool_calls, provider, model, usage).
     When provider is echo or tools unsupported, returns (reply_text, [], provider, model, usage).
     """
-    provider, model, cfg_base_url, cfg_api_key = _resolve_llm_settings(params)
+    provider, model, cfg_base_url, cfg_api_key, thinking_level = _resolve_llm_settings(params)
 
     if provider in ("", "echo", "debug"):
         default_model = "gpt-4o-mini"
@@ -335,6 +468,7 @@ def generate_reply_with_tools(
             model=model or spec.default_model or "gpt-4o-mini",
             api_key=api_key or "none",
             base_url=base_url,
+            extra_body=_thinking_extra_body(provider, thinking_level),
         )
         return reply, [], provider, model or spec.default_model, usage
 
@@ -345,6 +479,7 @@ def generate_reply_with_tools(
             model=model or spec.default_model or "gpt-4o-mini",
             api_key=api_key or "none",
             base_url=base_url,
+            extra_body=_thinking_extra_body(provider, thinking_level),
         )
         return content, tool_calls, provider, model or spec.default_model, usage
     except Exception as e:
@@ -358,7 +493,7 @@ def generate_reply(params: AgentRunParams, *, messages: Optional[List[Dict[str, 
     Returns:
         reply_text, provider, model, usage
     """
-    provider, model, cfg_base_url, cfg_api_key = _resolve_llm_settings(params)
+    provider, model, cfg_base_url, cfg_api_key, thinking_level = _resolve_llm_settings(params)
 
     # Echo backend (default, local only)
     if provider in ("", "echo", "debug"):
@@ -399,6 +534,7 @@ def generate_reply(params: AgentRunParams, *, messages: Optional[List[Dict[str, 
             model=model or spec.default_model or "gpt-4o-mini",
             api_key=api_key or "none",
             base_url=base_url,
+            extra_body=_thinking_extra_body(provider, thinking_level),
         )
         return text or "", provider, model or spec.default_model, usage
     except Exception as e:

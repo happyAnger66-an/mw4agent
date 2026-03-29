@@ -26,6 +26,8 @@ class ChannelCapabilities:
     chat_types: tuple[Literal["direct", "group", "channel", "thread"], ...] = ("direct", "group")
     native_commands: bool = False
     block_streaming: bool = False
+    #: When True, ChannelDispatcher may subscribe to EventStream ``llm`` during direct runs.
+    subscribe_llm_stream: bool = False
 
 
 @dataclass(frozen=True)

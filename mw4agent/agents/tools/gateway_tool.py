@@ -27,7 +27,18 @@ def resolve_gateway_options(context: Optional[Dict[str, Any]] = None) -> Gateway
     if context and isinstance(context.get("gateway_base_url"), str):
         ctx_url = context["gateway_base_url"].strip() or None
     env_url = os.getenv("MW4AGENT_GATEWAY_URL", "").strip() or None
-    return GatewayCallOptions(base_url=ctx_url or env_url or "http://127.0.0.1:18790")
+    timeout_ms = 30_000
+    if context:
+        raw = context.get("default_tool_timeout_ms")
+        if raw is not None:
+            try:
+                timeout_ms = max(1, int(raw))
+            except (TypeError, ValueError):
+                pass
+    return GatewayCallOptions(
+        base_url=ctx_url or env_url or "http://127.0.0.1:18790",
+        timeout_ms=timeout_ms,
+    )
 
 
 class GatewayLsTool(AgentTool):

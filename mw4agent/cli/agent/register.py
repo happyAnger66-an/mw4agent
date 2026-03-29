@@ -12,6 +12,7 @@ from ..context import ProgramContext
 from ...agents.agent_manager import AgentManager
 from ...config.paths import normalize_agent_id
 from ...gateway.client import call_rpc
+from ...gateway.wait_timeout import resolve_agent_wait_timeout_ms, rpc_client_timeout_ms
 from ...agents.tools import GatewayLsTool
 
 
@@ -157,7 +158,12 @@ def register_agent_cli(program: click.Group, ctx: ProgramContext) -> None:
         show_default=True,
         help="Path argument for gateway_ls when --with-gateway-ls is set",
     )
-    @click.option("--timeout", type=int, default=30000, show_default=True, help="agent.wait timeout (ms)")
+    @click.option(
+        "--timeout",
+        type=int,
+        default=None,
+        help="agent.wait timeout (ms); omit for gateway default (see gateway.agentWaitTimeoutMs, env MW4AGENT_GATEWAY_AGENT_WAIT_TIMEOUT_MS)",
+    )
     @click.option("--json", "json_output", is_flag=True, help="Output JSON")
     @click.pass_context
     def agent_run(
@@ -169,7 +175,7 @@ def register_agent_cli(program: click.Group, ctx: ProgramContext) -> None:
         agent_id: str,
         with_gateway_ls: bool,
         ls_path: str,
-        timeout: int,
+        timeout: Optional[int],
         json_output: bool,
     ) -> None:
         """Trigger one LLM run via Gateway RPC, optionally using the gateway_ls tool."""
@@ -201,6 +207,7 @@ def register_agent_cli(program: click.Group, ctx: ProgramContext) -> None:
             )
 
         idem = str(uuid.uuid4())
+        wait_ms = resolve_agent_wait_timeout_ms(timeout)
         agent_params = {
             "message": message,
             "sessionKey": session_key,
@@ -213,7 +220,7 @@ def register_agent_cli(program: click.Group, ctx: ProgramContext) -> None:
             agent_params["extraSystemPrompt"] = extra_system_prompt
 
         # 1) Fire agent run
-        start_res = call_rpc(base_url=base_url, method="agent", params=agent_params, timeout_ms=timeout)
+        start_res = call_rpc(base_url=base_url, method="agent", params=agent_params, timeout_ms=120_000)
         if start_res.get("ok") is not True:
             if json_output:
                 click.echo(jsonlib.dumps(start_res, indent=2), err=True)
@@ -233,8 +240,8 @@ def register_agent_cli(program: click.Group, ctx: ProgramContext) -> None:
         wait_res = call_rpc(
             base_url=base_url,
             method="agent.wait",
-            params={"runId": run_id, "timeoutMs": timeout},
-            timeout_ms=timeout + 1000,
+            params={"runId": run_id, "timeoutMs": wait_ms},
+            timeout_ms=rpc_client_timeout_ms(wait_ms),
         )
 
         if json_output:

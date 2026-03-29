@@ -18,6 +18,7 @@ from ..agents.runner.runner import AgentRunner
 from ..agents.session.manager import SessionManager
 from ..agents.types import AgentRunParams
 from ..gateway.client import call_rpc
+from ..gateway.wait_timeout import resolve_agent_wait_timeout_ms, rpc_client_timeout_ms
 from ..log import get_logger
 from .mention_gating import resolve_mention_gating
 from .registry import ChannelRegistry, get_channel_registry
@@ -27,6 +28,12 @@ from .feishu_agent_progress import (
     feishu_session_wants_tool_progress,
     format_agent_stream_event_for_feishu,
     parse_feishu_tool_progress_command,
+)
+from .feishu_llm_stream import (
+    FEISHU_LLM_STREAM_META_KEY,
+    feishu_session_effective_llm_stream,
+    format_llm_stream_event_for_feishu,
+    parse_feishu_thinking_command,
 )
 from .types import InboundContext, OutboundPayload
 
@@ -96,6 +103,34 @@ class ChannelDispatcher:
                     )
                     return
 
+        # Feishu：/thinking | /close_thinking 控制本会话是否订阅并推送 LLM 流（思考/片段/工具计划）
+        if _is_feishu_channel(ctx.channel):
+            think_cmd, think_remainder = parse_feishu_thinking_command(ctx.text or "")
+            if think_cmd is not None:
+                entry = self.runtime.session_manager.get_or_create_session(
+                    ctx.session_id, ctx.session_key, ctx.agent_id
+                )
+                meta = dict(entry.metadata or {})
+                meta[FEISHU_LLM_STREAM_META_KEY] = think_cmd
+                self.runtime.session_manager.update_session(ctx.session_id, metadata=meta)
+                ctx = replace(ctx, text=think_remainder)
+                if not think_remainder.strip():
+                    ack = (
+                        "已开启模型思考与片段推送（本会话）。Agent 回复过程中将推送 `[模型]` 消息。发送 `/close_thinking` 可关闭。"
+                        if think_cmd
+                        else "已关闭模型思考与片段推送。发送 `/thinking` 可重新开启。"
+                    )
+                    extra = {
+                        "inbound": {
+                            "extra": ctx.extra if isinstance(ctx.extra, dict) else {},
+                            "session_id": ctx.session_id,
+                        }
+                    }
+                    await plugin.deliver(
+                        OutboundPayload(text=ack, is_error=False, extra=extra)
+                    )
+                    return
+
         # Feishu：在用户消息下添加「思考/正在输入」表情，回复完成或异常后移除（与 OpenClaw 一致）
         typing_state = None
         if _is_feishu_channel(ctx.channel) and isinstance(ctx.extra, dict):
@@ -109,21 +144,35 @@ class ChannelDispatcher:
 
                     typing_state = await add_typing_indicator(str(msg_id))
 
-        # Feishu + direct AgentRunner: stream tool-call progress into the chat (same thread when possible).
-        progress_run_id: Optional[str] = None
+        # Direct AgentRunner: optional stable run_id for tool / llm EventStream subscriptions.
+        direct_run_id: Optional[str] = None
         progress_handler = None
+        llm_handler = None
         es = self.runtime.agent_runner.event_stream
-        if (
+        cap = getattr(plugin, "capabilities", None)
+        llm_cap = cap is not None and getattr(cap, "subscribe_llm_stream", False)
+        want_llm_stream = False
+        if llm_cap and not self.runtime.gateway_base_url:
+            if _is_feishu_channel(ctx.channel):
+                want_llm_stream = feishu_session_effective_llm_stream(
+                    self.runtime.session_manager, ctx.session_id
+                )
+            else:
+                want_llm_stream = True
+        feishu_tool_progress = (
             _is_feishu_channel(ctx.channel)
             and not self.runtime.gateway_base_url
             and feishu_progress_updates_enabled()
             and feishu_session_wants_tool_progress(self.runtime.session_manager, ctx.session_id)
-        ):
-            progress_run_id = str(uuid.uuid4())
+        )
+        if (feishu_tool_progress or want_llm_stream) and not self.runtime.gateway_base_url:
+            direct_run_id = str(uuid.uuid4())
+
+        if direct_run_id is not None and feishu_tool_progress:
 
             async def progress_handler(event: AgentStreamEvent) -> None:
                 data = event.data if isinstance(event.data, dict) else {}
-                if data.get("run_id") != progress_run_id:
+                if data.get("run_id") != direct_run_id:
                     return
                 line = format_agent_stream_event_for_feishu(event)
                 if not line:
@@ -138,6 +187,25 @@ class ChannelDispatcher:
 
             es.subscribe("tool", progress_handler)
 
+        if direct_run_id is not None and want_llm_stream:
+
+            async def llm_handler(event: AgentStreamEvent) -> None:
+                data = event.data if isinstance(event.data, dict) else {}
+                if data.get("run_id") != direct_run_id:
+                    return
+                line = format_llm_stream_event_for_feishu(event)
+                if not line:
+                    return
+                fn = getattr(plugin, "feishu_send_progress", None)
+                if not callable(fn):
+                    return
+                try:
+                    await fn(line, ctx)
+                except Exception as e:
+                    logger.debug("channel llm stream handler error: %s", e)
+
+            es.subscribe("llm", llm_handler)
+
         try:
             # Call agent via Gateway RPC (aligned with OpenClaw) or direct AgentRunner
             if self.runtime.gateway_base_url:
@@ -145,9 +213,7 @@ class ChannelDispatcher:
                 result_text = await self._call_agent_via_gateway(ctx)
             else:
                 logger.debug("calling agent direct")
-                result_text = await self._call_agent_direct(
-                    ctx, run_id=progress_run_id if progress_handler is not None else None
-                )
+                result_text = await self._call_agent_direct(ctx, run_id=direct_run_id)
 
             if result_text:
                 logger.info("channel=%s reply length=%s", ctx.channel, len(result_text))
@@ -170,6 +236,8 @@ class ChannelDispatcher:
         finally:
             if progress_handler is not None:
                 es.unsubscribe("tool", progress_handler)
+            if llm_handler is not None:
+                es.unsubscribe("llm", llm_handler)
             if typing_state is not None:
                 fn_end = getattr(plugin, "feishu_typing_end", None)
                 if callable(fn_end):
@@ -205,11 +273,12 @@ class ChannelDispatcher:
 
         # Wait for completion
         try:
+            wait_ms = resolve_agent_wait_timeout_ms(None)
             wait_res = call_rpc(
                 base_url=base_url,
                 method="agent.wait",
-                params={"runId": run_id, "timeoutMs": 30000},
-                timeout_ms=32000,
+                params={"runId": run_id, "timeoutMs": wait_ms},
+                timeout_ms=rpc_client_timeout_ms(wait_ms),
             )
         except Exception as e:
             logger.error("gateway agent.wait RPC failed: %s", e, exc_info=True)
