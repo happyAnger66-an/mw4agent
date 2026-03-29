@@ -197,6 +197,16 @@ mw4agent channels feishu add --app-id <APP_ID> --app-secret <APP_SECRET>
 # 凭证也可来自环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET；未传参时会提示输入。
 ```
 
+为 **feishu-docs** 等 MCP 文档工具准备用户访问令牌（设备授权，落盘 `~/.mw4agent/feishu_oauth.json`）：
+
+```bash
+mw4agent feishu authorize
+# 多账号：mw4agent feishu authorize --account <key>
+# 状态：mw4agent feishu oauth-status
+```
+
+或在 **飞书机器人会话** 中发送 `/mw4auth`、`/feishu_auth` 或 `飞书授权`，机器人会推送授权卡片（与 CLI 同属设备码流，令牌按用户 open_id 落盘）。
+
 Webhook 模式运行示例（独立进程）：
 
 ```bash

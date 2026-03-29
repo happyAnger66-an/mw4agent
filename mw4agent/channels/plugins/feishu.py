@@ -252,6 +252,26 @@ class FeishuChannel(ChannelPlugin):
             sender_id_obj = sender.get("sender_id") or {}
             sender_open_id = sender_id_obj.get("open_id")
 
+            if self._feishu_cfg is not None:
+                from ...feishu.feishu_oauth_chat import (
+                    is_feishu_oauth_chat_command,
+                    run_feishu_oauth_card_flow,
+                )
+
+                if is_feishu_oauth_chat_command(text):
+                    brand = (
+                        "lark"
+                        if "larksuite" in (self._feishu_cfg.api_base or "").lower()
+                        else "feishu"
+                    )
+                    await run_feishu_oauth_card_flow(
+                        feishu_cfg=self._feishu_cfg,
+                        chat_id=str(chat_id or ""),
+                        sender_open_id=str(sender_open_id or ""),
+                        brand=brand,
+                    )
+                    return JSONResponse(content={"code": 0, "msg": "ok"})
+
             ctx = self._build_inbound_context(
                 text=text,
                 chat_id=chat_id,
@@ -364,6 +384,30 @@ class FeishuChannel(ChannelPlugin):
                     sender_id_obj = getattr(sender, "sender_id", None)
                     if sender_id_obj is not None:
                         sender_open_id = getattr(sender_id_obj, "open_id", None)
+
+                if self._feishu_cfg is not None:
+                    from ...feishu.feishu_oauth_chat import (
+                        is_feishu_oauth_chat_command,
+                        run_feishu_oauth_card_flow,
+                    )
+
+                    if is_feishu_oauth_chat_command(text):
+                        brand = (
+                            "lark"
+                            if "larksuite" in (self._feishu_cfg.api_base or "").lower()
+                            else "feishu"
+                        )
+
+                        async def _oauth_card() -> None:
+                            await run_feishu_oauth_card_flow(
+                                feishu_cfg=self._feishu_cfg,
+                                chat_id=str(chat_id or ""),
+                                sender_open_id=str(sender_open_id or ""),
+                                brand=brand,
+                            )
+
+                        asyncio.run_coroutine_threadsafe(_oauth_card(), loop)
+                        return
 
                 ctx = self._build_inbound_context(
                     text=text,

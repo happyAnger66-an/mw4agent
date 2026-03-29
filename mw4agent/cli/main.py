@@ -8,6 +8,7 @@ from .registry import get_registry, CommandEntry
 from .gateway import register_gateway_cli
 from .node_host import register_node_host_cli
 from .channels.register import register_channels_cli
+from .feishu_cli import register_feishu_cli
 from .agent.register import register_agent_cli
 from .configuration import register_configuration_cli
 from .skills.register import register_skills_cli
@@ -112,6 +113,18 @@ def register_core_commands(program: click.Group, ctx: ProgramContext) -> None:
         register=register_channels_cli,
     )
     get_registry().register_entry(channels_entry)
+
+    feishu_entry = CommandEntry(
+        commands=[
+            {
+                "name": "feishu",
+                "description": "Feishu user OAuth and local UAT for MCP doc tools",
+                "has_subcommands": True,
+            }
+        ],
+        register=register_feishu_cli,
+    )
+    get_registry().register_entry(feishu_entry)
 
     configuration_entry = CommandEntry(
         commands=[

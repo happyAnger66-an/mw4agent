@@ -84,7 +84,7 @@ def _profile_allow_list(profile: str) -> List[str]:
 
     Profiles are intentionally simple and based on tool *names*:
     - minimal: no tools (LLM-only)
-    - coding: file + memory tools (read/write/memory_*)
+    - coding: file + memory tools (read/write/memory_*) plus optional Feishu 文档插件工具 (feishu_*)
     - full: all tools ("*")
     """
     p = (profile or "").strip().lower()
@@ -99,6 +99,8 @@ def _profile_allow_list(profile: str) -> List[str]:
         "memory_search",
         "memory_get",
         "memory_write",
+        # feishu-docs 等插件注册的工具名均以 feishu_ 开头；未加载插件时 registry 中不存在，无影响
+        "feishu_*",
     ]
 
 

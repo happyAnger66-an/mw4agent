@@ -66,7 +66,7 @@ mw4agent 的工具权限可理解为两层：
 在 `mw4agent/agents/tools/policy.py` 中，profile 决定一份“基础 allowlist”：
 
 - `minimal`：空（默认不暴露工具）
-- `coding`：`read`、`write`、`memory_*`（当前内置的基础集合）
+- `coding`：`read`、`write`、`memory_*`，以及 glob `feishu_*`（已加载飞书相关插件时对应的工具名）
 - `full`：`["*"]`（不过滤；允许所有非 deny 的工具）
 
 ### 3.2 allow/deny 规则

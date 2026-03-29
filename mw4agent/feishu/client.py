@@ -148,6 +148,33 @@ class FeishuClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def send_interactive_card(
+        self,
+        *,
+        chat_id: str,
+        card: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """发送消息卡片（schema 2.0），用于 OAuth 授权引导等场景。"""
+        token = await self._get_tenant_access_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        url = f"{self._base}/im/v1/messages"
+        params = {"receive_id_type": "chat_id"}
+        payload = {
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": json.dumps(card, ensure_ascii=False),
+        }
+        async with httpx.AsyncClient(timeout=30.0, headers=headers, params=params) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data: Dict[str, Any] = resp.json()
+        if data.get("code") not in (0, None):
+            raise RuntimeError(f"Feishu send_interactive_card failed: {data}")
+        return data
+
     async def add_reaction(
         self,
         *,

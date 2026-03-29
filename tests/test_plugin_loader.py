@@ -18,6 +18,7 @@ from mw4agent.agents.skills.snapshot import build_skill_snapshot
 FIXTURES_PLUGINS = Path(__file__).resolve().parent / "fixtures" / "plugins"
 ECHO_PLUGIN_ROOT = FIXTURES_PLUGINS / "echo_plugin"
 SKILL_PLUGIN_ROOT = FIXTURES_PLUGINS / "skill_plugin"
+REPO_PLUGINS_DIR = Path(__file__).resolve().parent.parent / "plugins"
 
 
 def test_discover_plugins_empty_when_no_env(tmp_path, monkeypatch):
@@ -42,6 +43,16 @@ def test_discover_plugins_single_root_as_plugin(tmp_path, monkeypatch):
     assert len(infos) == 1
     assert infos[0].name == "single"
     assert infos[0].root == tmp_path
+
+
+def test_load_feishu_docs_plugin_registers_tools():
+    reg = ToolRegistry()
+    infos = load_plugins(plugin_dirs=[REPO_PLUGINS_DIR], registry=reg)
+    names = [p.name for p in infos]
+    assert "feishu-docs" in names
+    assert reg.get_tool("feishu_fetch_doc") is not None
+    assert reg.get_tool("feishu_create_doc") is not None
+    assert reg.get_tool("feishu_update_doc") is not None
 
 
 def test_load_plugins_registers_tools():

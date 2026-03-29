@@ -58,6 +58,21 @@ TOOL_PROCESSING_START_SEC = 30.0
 TOOL_PROCESSING_INTERVAL_SEC = 60.0
 
 
+def _merge_llm_usage(a: LLMUsage, b: LLMUsage) -> LLMUsage:
+    """Sum token counts across tool-loop rounds and the finalize text-only turn."""
+
+    def _add(x: Optional[int], y: Optional[int]) -> Optional[int]:
+        if x is None and y is None:
+            return None
+        return int((x or 0) + (y or 0))
+
+    return LLMUsage(
+        input_tokens=_add(a.input_tokens, b.input_tokens),
+        output_tokens=_add(a.output_tokens, b.output_tokens),
+        total_tokens=_add(a.total_tokens, b.total_tokens),
+    )
+
+
 def _resolve_run_workspace_dir(params: AgentRunParams) -> str:
     """Tools/memory/transcript cwd when params.workspace_dir is unset.
 

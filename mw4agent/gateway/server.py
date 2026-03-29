@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -190,6 +191,21 @@ def create_app(
         yield
 
     app = FastAPI(title="MW4Agent Gateway", version="0.1", lifespan=lifespan)
+    # Allow the Next.js / Tauri desktop UI (and other local dev origins) to call POST /rpc.
+    # Set GATEWAY_CORS_ORIGINS="http://localhost:3000,https://tauri.localhost" for stricter dev,
+    # or leave unset for allow_origins=["*"] (no credentials).
+    _cors_raw = (os.environ.get("GATEWAY_CORS_ORIGINS") or "").strip()
+    if _cors_raw:
+        _cors_origins = [o.strip() for o in _cors_raw.split(",") if o.strip()]
+    else:
+        _cors_origins = ["*"]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     for r in feishu_webhook_routers:
         app.include_router(r)
 
@@ -658,6 +674,39 @@ def create_app(
                     }
                 )
             return {"id": req_id, "ok": True, "payload": {"agents": items}}
+
+        if method == "skills.list":
+            try:
+                from ..agents.skills.snapshot import build_skill_snapshot
+            except Exception as e:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "unavailable", "message": f"skills.list failed: {e}"},
+                }
+            workspace_dir = str(params.get("workspaceDir") or "").strip() or None
+            try:
+                snapshot = build_skill_snapshot(workspace_dir=workspace_dir)
+            except Exception as e:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "unavailable", "message": f"skills.snapshot failed: {e}"},
+                }
+            payload: Dict[str, Any] = {
+                "skills": snapshot.get("skills") or [],
+                "count": int(snapshot.get("count") or 0),
+                "version": snapshot.get("version"),
+                "sources": snapshot.get("sources") or [],
+                "promptTruncated": bool(snapshot.get("prompt_truncated")),
+                "promptCompact": bool(snapshot.get("prompt_compact")),
+                "promptCount": snapshot.get("prompt_count"),
+                "skillFilter": snapshot.get("skill_filter") or [],
+                "filteredOut": snapshot.get("filtered_out") or [],
+            }
+            if params.get("includePrompt") is True:
+                payload["prompt"] = snapshot.get("prompt") or ""
+            return {"id": req_id, "ok": True, "payload": payload}
 
         if method == "health":
             return {"id": req_id, "ok": True, "payload": await health()}

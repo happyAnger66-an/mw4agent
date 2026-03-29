@@ -7,6 +7,7 @@ Python 实现的智能体网关与 CLI，设计上参考 [OpenClaw](https://gith
 - **Gateway**：HTTP RPC（`agent` / `agent.wait` / `health`）与 WebSocket 事件流（`/ws`），支持幂等、run 注册与等待
 - **Agent Runner**：基于 LLM 的对话与工具调用循环，支持 reasoning/thinking 流式输出、内置 read/write 工具（workspace 限定）
 - **CLI**：可扩展命令注册与懒加载，提供 `gateway`、`agent`、`channels`、`config`、`configuration` 等命令组
+- **Desktop（Orbit）**：Next.js + Tauri 桌面 / 独立 Web 前端，经 RPC 与 WebSocket 连接 Gateway；用法见 [mw4agent/desktop/README.md](mw4agent/desktop/README.md)
 - **Dashboard**：浏览器控制台，连接 Gateway WebSocket，支持聊天、事件流展示与多语言/主题
 - **Channels**：Console、Telegram、Webhook、飞书等通道，可独立运行或与 Gateway 配合
 - **配置与安全**：加密配置文件、LLM provider/model 配置、技能（skills）管理
@@ -37,6 +38,10 @@ mw4agent --help
 mw4agent gateway run --bind 127.0.0.1 --port 18790
 mw4agent gateway status --url http://127.0.0.1:18790
 ```
+
+### Desktop（Orbit）
+
+独立桌面或本地 Web 界面（`npm run dev` / Tauri），与 Gateway 使用相同的 **HTTP RPC** 与 **WebSocket**；需先启动 Gateway，再按 **[Desktop 使用说明](mw4agent/desktop/README.md)** 安装依赖、配置 `NEXT_PUBLIC_GATEWAY_URL` 并运行。
 
 ### Dashboard 控制台
 
@@ -92,6 +97,7 @@ mw4agent/
 │   ├── manuals/cli.md     # CLI 使用手册（推荐入口）
 │   ├── architecture/     # 架构与设计文档
 │   └── openclaw/         # 与 OpenClaw 的对照与说明
+├── plugins/              # 可选插件（如 feishu_docs：飞书云文档 MCP）
 ├── setup.py
 └── README.md
 ```

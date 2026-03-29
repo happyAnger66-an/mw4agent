@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --border: #334155;
+  --text: #f1f5f9;
+  --muted: #94a3b8;
+  --accent: #3b82f6;
+  --user-bg: #1d4ed8;
+  --assistant-bg: #334155;
+}
+
+.light {
+  --bg: #f8fafc;
+  --panel: #ffffff;
+  --border: #e2e8f0;
+  --text: #0f172a;
+  --muted: #64748b;
+  --accent: #2563eb;
+  --user-bg: #dbeafe;
+  --assistant-bg: #f1f5f9;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}

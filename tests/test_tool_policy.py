@@ -109,3 +109,19 @@ def test_resolve_effective_allow_patterns_full_profile():
     p = ToolPolicyConfig(profile="full", allow=None, deny=None)
     assert resolve_effective_allow_patterns(p) == ["*"]
 
+
+def test_coding_profile_allows_feishu_plugin_tools_via_glob():
+    tools = _make_tools() + [
+        DummyTool(
+            name="feishu_fetch_doc",
+            description="",
+            parameters={},
+            owner_only=False,
+        ),
+    ]
+    pol = ToolPolicyConfig(profile="coding")
+    allowed = filter_tools_by_policy(tools, pol)
+    names = {t.name for t in allowed}
+    assert "feishu_fetch_doc" in names
+    assert "read" in names
+

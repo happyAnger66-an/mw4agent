@@ -44,3 +44,22 @@ htmlcov/
 
 # Session store backups (tests/dev runs)
 /mw4agent.sessions.json.bak*
+
+# Desktop app (Next + Tauri) — build / dev / bundle artifacts under mw4agent/desktop/
+mw4agent/desktop/node_modules/
+mw4agent/desktop/.next/
+mw4agent/desktop/out/
+mw4agent/desktop/.turbo/
+mw4agent/desktop/.vercel/
+mw4agent/desktop/coverage/
+mw4agent/desktop/.eslintcache
+mw4agent/desktop/*.tsbuildinfo
+mw4agent/desktop/npm-debug.log*
+mw4agent/desktop/yarn-debug.log*
+mw4agent/desktop/yarn-error.log*
+mw4agent/desktop/pnpm-debug.log*
+mw4agent/desktop/.env
+mw4agent/desktop/.env.*
+!mw4agent/desktop/.env*.example
+mw4agent/desktop/src-tauri/target/
+mw4agent/desktop/src-tauri/gen/

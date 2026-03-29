@@ -1,0 +1,7 @@
+{
+  "name": "feishu-docs",
+  "version": "0.1.0",
+  "description": "Feishu cloud docs via official MCP (fetch-doc, create-doc, update-doc)",
+  "tools_module": "tools",
+  "skills_dir": "skills"
+}
