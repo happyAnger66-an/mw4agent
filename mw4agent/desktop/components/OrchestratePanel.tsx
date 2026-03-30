@@ -19,6 +19,7 @@ import {
   orchestrateList,
   orchestrateSend,
   type ListedAgent,
+  type AgentWsEvent,
   type OrchMessage,
   type OrchestrateDagSpec,
   type OrchestrateListItem,
@@ -26,6 +27,63 @@ import {
 import { specHasCycle } from "@/lib/orchestrateDagFlow";
 import { useI18n } from "@/lib/i18n";
 import { ChatThinkToolCheckbox } from "@/components/ChatThinkToolCheckbox";
+import { busyFromOrchestrateStatus } from "@/lib/orchestratePollBusy";
+import { useGatewayWs } from "@/lib/gateway-ws-context";
+
+type ToolTraceRow = {
+  id: string;
+  name: string;
+  state: "running" | "done" | "error";
+  preview?: string;
+  elapsedMs?: number;
+};
+
+type PlannedToolCall = { name: string; arguments_preview?: string };
+
+type LiveRun = {
+  runId: string;
+  agentId?: string;
+  step?: string;
+  reasoning?: string;
+  plannedToolCalls?: PlannedToolCall[];
+  toolTraces?: ToolTraceRow[];
+};
+
+function formatToolResultPreview(r: unknown): string {
+  if (r == null) return "";
+  if (typeof r === "string") return r.length > 4000 ? `${r.slice(0, 4000)}…` : r;
+  try {
+    const s = JSON.stringify(r, null, 0);
+    return s.length > 4000 ? `${s.slice(0, 4000)}…` : s;
+  } catch {
+    return String(r).slice(0, 4000);
+  }
+}
+
+function upsertToolTrace(
+  traces: ToolTraceRow[] | undefined,
+  toolCallId: string,
+  patch: Partial<ToolTraceRow> & { name?: string }
+): ToolTraceRow[] {
+  const list = traces ? [...traces] : [];
+  const idx = list.findIndex((t) => t.id === toolCallId);
+  const base: ToolTraceRow =
+    idx >= 0
+      ? list[idx]
+      : {
+          id: toolCallId,
+          name: (patch.name || "?").trim() || "?",
+          state: "running",
+        };
+  const next: ToolTraceRow = {
+    ...base,
+    ...patch,
+    name: (patch.name ?? base.name).trim() || base.name,
+  };
+  if (idx >= 0) list[idx] = next;
+  else list.push(next);
+  return list;
+}
 
 const DEFAULT_DAG_SPEC: OrchestrateDagSpec = {
   nodes: [
@@ -108,6 +166,7 @@ function speakerCardClass(speaker: string): string {
 
 export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) {
   const { t } = useI18n();
+  const { subscribe, connectionState } = useGatewayWs();
   const [listedAgents, setListedAgents] = useState<ListedAgent[]>([]);
   const [orches, setOrches] = useState<OrchestrateListItem[]>([]);
   const [selectedOrchId, setSelectedOrchId] = useState<string>("");
@@ -147,8 +206,159 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
   const [input, setInput] = useState("");
   const [streamReasoning, setStreamReasoning] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [live, setLive] = useState<LiveRun | null>(null);
   const messagesWrapRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const orchId = selectedOrchId.trim();
+    if (!orchId) {
+      setLive(null);
+      return;
+    }
+    const wantSessionKey = `orch:${orchId}`;
+    return subscribe((payload: AgentWsEvent) => {
+      const data = payload.data || {};
+      const runId = payload.run_id || (data.run_id as string) || "";
+      const stream = payload.stream;
+      const sessionKeyRaw =
+        (data.session_key as string) ||
+        (data.sessionKey as string) ||
+        "";
+      if (!runId || !sessionKeyRaw || String(sessionKeyRaw).trim() !== wantSessionKey) {
+        return;
+      }
+      const agentId = typeof data.agent_id === "string" ? data.agent_id : undefined;
+
+      if (stream === "lifecycle") {
+        const phase = String((data.phase as string) || "");
+        if (phase === "start") {
+          setLive({
+            runId,
+            agentId,
+            step: t("stepThinking"),
+            reasoning: "",
+            plannedToolCalls: [],
+            toolTraces: [],
+          });
+        }
+        if (phase === "end" || phase === "error") {
+          setLive((prev) => (prev && prev.runId === runId ? { ...prev, step: undefined } : prev));
+        }
+        return;
+      }
+
+      if (stream === "tool") {
+        const typ = String((data.type as string) || "");
+        const name = String((data.tool_name as string) || "?");
+        const tcid = String((data.tool_call_id as string) || (data.toolCallId as string) || name || runId);
+        if (typ === "start") {
+          setLive((prev) => {
+            const cur = prev && prev.runId === runId ? prev : { runId, agentId };
+            return {
+              ...cur,
+              step: t("stepCallingTool", { name }),
+              toolTraces: upsertToolTrace(cur.toolTraces, tcid, { name, state: "running" }),
+            } as LiveRun;
+          });
+        } else if (typ === "processing") {
+          const elapsed = (data.elapsed_ms as number) ?? (data.elapsedMs as number);
+          const sec =
+            typeof elapsed === "number" && Number.isFinite(elapsed)
+              ? Math.max(0, Math.round(elapsed / 1000))
+              : 0;
+          setLive((prev) => {
+            const cur = prev && prev.runId === runId ? prev : { runId, agentId };
+            return {
+              ...cur,
+              step: t("chatToolRunning", { name, seconds: sec }),
+              toolTraces: upsertToolTrace(cur.toolTraces, tcid, {
+                name,
+                state: "running",
+                elapsedMs: typeof elapsed === "number" ? elapsed : undefined,
+              }),
+            } as LiveRun;
+          });
+        } else if (typ === "end") {
+          const ok = (data.success as boolean) !== false;
+          const preview = formatToolResultPreview(data.result);
+          setLive((prev) => {
+            const cur = prev && prev.runId === runId ? prev : { runId, agentId };
+            return {
+              ...cur,
+              step: t("stepToolDone", { name }),
+              toolTraces: upsertToolTrace(cur.toolTraces, tcid, {
+                name,
+                state: ok ? "done" : "error",
+                preview: preview || undefined,
+              }),
+            } as LiveRun;
+          });
+        } else if (typ === "error") {
+          const err = String((data.error as string) || "error");
+          setLive((prev) => {
+            const cur = prev && prev.runId === runId ? prev : { runId, agentId };
+            return {
+              ...cur,
+              step: t("stepToolDone", { name }),
+              toolTraces: upsertToolTrace(cur.toolTraces, tcid, {
+                name,
+                state: "error",
+                preview: err,
+              }),
+            } as LiveRun;
+          });
+        }
+        return;
+      }
+
+      if (stream === "llm") {
+        const rawCalls = (data.tool_calls as unknown) ?? (data.toolCalls as unknown);
+        if (Array.isArray(rawCalls) && rawCalls.length) {
+          const planned: PlannedToolCall[] = [];
+          for (const c of rawCalls) {
+            if (!c || typeof c !== "object") continue;
+            const o = c as Record<string, unknown>;
+            planned.push({
+              name: String(o.name ?? "?"),
+              arguments_preview:
+                typeof o.arguments_preview === "string"
+                  ? o.arguments_preview
+                  : typeof o.argumentsPreview === "string"
+                    ? o.argumentsPreview
+                    : undefined,
+            });
+          }
+          if (planned.length) {
+            setLive((prev) => {
+              const cur = prev && prev.runId === runId ? prev : { runId, agentId };
+              return { ...(cur as LiveRun), plannedToolCalls: planned };
+            });
+          }
+        }
+        if (data.thinking != null && String(data.thinking).trim()) {
+          const chunk = String(data.thinking).trim();
+          setLive((prev) => {
+            const cur = prev && prev.runId === runId ? prev : { runId, agentId };
+            const old = (cur as LiveRun).reasoning || "";
+            return { ...(cur as LiveRun), reasoning: (old ? `${old}\n\n` : "") + chunk };
+          });
+        }
+        return;
+      }
+
+      if (stream === "assistant") {
+        if (data.reasoning != null && String(data.reasoning).trim()) {
+          const chunk = String(data.reasoning).trim();
+          setLive((prev) => {
+            const cur = prev && prev.runId === runId ? prev : { runId, agentId };
+            const old = (cur as LiveRun).reasoning || "";
+            return { ...(cur as LiveRun), reasoning: (old ? `${old}\n\n` : "") + chunk };
+          });
+        }
+      }
+    });
+  }, [selectedOrchId, subscribe, t]);
 
   const loadAgents = useCallback(async () => {
     const r = await listAgents();
@@ -191,6 +401,11 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
   const lastListRefreshRef = useRef(0);
 
   useEffect(() => {
+    setBusy(false);
+    setLive(null);
+  }, [selectedOrchId]);
+
+  useEffect(() => {
     const orchId = selectedOrchId.trim();
     if (!orchId) return;
     lastListRefreshRef.current = 0;
@@ -223,9 +438,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
         lastListRefreshRef.current = now;
         void loadOrches();
       }
-      if (r.status && r.status !== "accepted" && r.status !== "running") {
-        setBusy(false);
-      }
+      setBusy(busyFromOrchestrateStatus(r.status));
     };
     void tick();
     const timer = window.setInterval(tick, 900);
@@ -263,27 +476,31 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
       return { ...prev, messages: [...(prev.messages || []), localUserMsg] };
     });
     const idem = `orch-send-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-    const r = await orchestrateSend(selectedOrchId, msgText, idem, {
-      reasoningLevel: streamReasoning ? "stream" : "off",
-    });
-    if (!r.ok) {
-      setBusy(false);
-      setError(r.error || t("orchestrateError"));
-      return;
-    }
-    setInput("");
-    // Pull latest state immediately (don't wait for polling tick).
-    const g = await orchestrateGet(selectedOrchId);
-    if (g.ok) {
-      setSelected({
-        orchId: g.orchId,
-        name: g.name,
-        status: g.status,
-        strategy: g.strategy,
-        participants: g.participants,
-        messages: g.messages || [],
-        dagProgress: g.dagProgress ?? undefined,
+    try {
+      const r = await orchestrateSend(selectedOrchId, msgText, idem, {
+        reasoningLevel: streamReasoning ? "stream" : "off",
       });
+      if (!r.ok) {
+        setBusy(false);
+        setError(r.error || t("orchestrateError"));
+        return;
+      }
+      setInput("");
+      const g = await orchestrateGet(selectedOrchId);
+      if (g.ok) {
+        setSelected({
+          orchId: g.orchId,
+          name: g.name,
+          status: g.status,
+          strategy: g.strategy,
+          participants: g.participants,
+          messages: g.messages || [],
+          dagProgress: g.dagProgress ?? undefined,
+        });
+      }
+    } catch (e) {
+      setBusy(false);
+      setError(e instanceof Error ? e.message : String(e));
     }
   }, [busy, canSend, input, selected?.messages, selectedOrchId, streamReasoning, t]);
 
@@ -524,6 +741,90 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-4">
           {error ? <p className="text-xs text-red-500/90 mb-2">{error}</p> : null}
+          {selectedOrchId && live ? (
+            <div className="mb-2 rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2 text-[10px] text-[var(--muted)]">
+                <span className="font-mono">
+                  run: {(live.runId || "").slice(0, 8) || "—"}…
+                  {live.agentId ? ` · ${live.agentId}` : ""}
+                </span>
+                <span className="ml-auto">
+                  ws:{" "}
+                  <span
+                    className={
+                      connectionState === "connected" ? "text-emerald-400" : "text-[var(--muted)]"
+                    }
+                  >
+                    {connectionState}
+                  </span>
+                </span>
+              </div>
+              {live.step ? <div className="text-xs text-[var(--muted)] mt-1">{live.step}</div> : null}
+              {live.plannedToolCalls && live.plannedToolCalls.length ? (
+                <div className="mt-2 text-[10px] text-[var(--muted)]">
+                  <div className="font-semibold text-[var(--text)]">{t("chatToolPlanned")}</div>
+                  <ul className="list-disc pl-4 space-y-0.5 font-mono break-all">
+                    {live.plannedToolCalls.slice(0, 6).map((p, i) => (
+                      <li key={`${p.name}-${i}`}>
+                        {p.name}
+                        {p.arguments_preview
+                          ? ` — ${
+                              p.arguments_preview.length > 160
+                                ? `${p.arguments_preview.slice(0, 160)}…`
+                                : p.arguments_preview
+                            }`
+                          : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {live.reasoning ? (
+                <div className="mt-2 text-xs text-[var(--muted)] border-l-2 border-[var(--accent)] pl-2 whitespace-pre-wrap max-h-40 overflow-y-auto">
+                  <span className="font-medium">{t("reasoning")}: </span>
+                  {live.reasoning}
+                </div>
+              ) : null}
+              {live.toolTraces && live.toolTraces.length ? (
+                <div className="mt-2 text-[10px] border border-[var(--border)] rounded-md p-2 bg-[var(--bg)]/40 max-h-40 overflow-y-auto">
+                  <div className="font-semibold text-[var(--muted)] mb-1">{t("chatToolActivity")}</div>
+                  <div className="space-y-2">
+                    {live.toolTraces.slice(-8).map((tr) => (
+                      <div
+                        key={tr.id}
+                        className="border-b border-[var(--border)]/60 last:border-0 pb-2 last:pb-0"
+                      >
+                        <div className="flex flex-wrap gap-2 items-baseline font-mono text-[10px]">
+                          <span
+                            className={
+                              tr.state === "error"
+                                ? "text-red-400"
+                                : tr.state === "done"
+                                  ? "text-emerald-400"
+                                  : "text-amber-400"
+                            }
+                          >
+                            {tr.state === "running" ? "…" : tr.state === "done" ? "✓" : "✗"}{" "}
+                            {tr.name}
+                          </span>
+                          {tr.elapsedMs != null ? (
+                            <span className="text-[var(--muted)]">
+                              {(tr.elapsedMs / 1000).toFixed(1)}s
+                            </span>
+                          ) : null}
+                        </div>
+                        {tr.preview ? (
+                          <pre className="mt-1 whitespace-pre-wrap break-words text-[9px] leading-relaxed text-[var(--text)] opacity-90">
+                            {tr.preview}
+                          </pre>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div
             ref={messagesWrapRef}
             className="min-h-0 flex-1 overflow-auto rounded-lg border border-[var(--border)] bg-[var(--panel)] p-3 space-y-2"
