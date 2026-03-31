@@ -93,7 +93,9 @@ class MemorySearchTool(AgentTool):
                 "disabled": True,
                 "error": "query is required",
             })
-        workspace_dir = (context or {}).get("workspace_dir") or ""
+        workspace_dir = (context or {}).get("agent_workspace_dir") or (context or {}).get(
+            "workspace_dir"
+        ) or ""
         if not workspace_dir:
             return _json_result({
                 "results": [],
@@ -201,7 +203,9 @@ class MemoryGetTool(AgentTool):
         path = _read_string_param(params, "path", required=True)
         if not path:
             return _json_result({"path": "", "text": "", "disabled": True, "error": "path is required"})
-        workspace_dir = (context or {}).get("workspace_dir") or ""
+        workspace_dir = (context or {}).get("agent_workspace_dir") or (context or {}).get(
+            "workspace_dir"
+        ) or ""
         if not workspace_dir:
             return _json_result({"path": path, "text": "", "disabled": True, "error": "workspace_dir not set"})
         from_line = _read_number_param(params, "from", integer=True)
@@ -280,7 +284,9 @@ class MemoryWriteTool(AgentTool):
         if not isinstance(content, str):
             content = str(content)
         append = bool(params.get("append") is True)
-        workspace_dir = (context or {}).get("workspace_dir") or ""
+        workspace_dir = (context or {}).get("agent_workspace_dir") or (context or {}).get(
+            "workspace_dir"
+        ) or ""
         if not workspace_dir:
             return ToolResult(
                 success=False,

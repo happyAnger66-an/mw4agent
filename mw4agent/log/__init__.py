@@ -15,6 +15,7 @@ Configuration (env):
   MW4AGENT_LOG_FILE_BACKUP_COUNT - number of backup files (default: 5)
   MW4AGENT_LOG_HOST        - host:port for TCP log host (e.g. 127.0.0.1:9020)
   MW4AGENT_LOG_FORMAT      - optional format string
+  MW4AGENT_LOG_AGENT_COLORS - 1|0 : color ``[agent:id]`` prefixes in LLM INFO logs when stderr is a TTY (default: 1). Honors NO_COLOR.
 """
 
 from __future__ import annotations

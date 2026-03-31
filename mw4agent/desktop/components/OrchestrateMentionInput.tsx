@@ -20,6 +20,7 @@ type OrchestrateMentionInputProps = {
   value: string;
   onChange: (v: string) => void;
   onSubmit: () => void;
+  /** When true, blocks Enter-to-submit only; input stays editable (e.g. compose next message while orchestration runs). */
   busy?: boolean;
   placeholder: string;
   participants: string[];
@@ -192,7 +193,6 @@ export function OrchestrateMentionInput({
         onClick={handleSelect}
         placeholder={placeholder}
         onKeyDown={handleKeyDown}
-        disabled={busy}
         autoComplete="off"
         aria-expanded={mentionOpen}
         aria-controls={mentionOpen ? "orch-mention-suggestions" : undefined}

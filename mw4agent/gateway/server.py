@@ -635,6 +635,7 @@ def create_app(
                             agent_id=agent_id,
                             channel=str(params.get("channel") or "internal"),
                             deliver=bool(params.get("deliver") is True),
+                            sandbox=bool(params.get("sandbox") is True),
                             extra_system_prompt=extra_system_prompt,
                             thinking_level=str(params.get("thinkingLevel") or "").strip() or None,
                             reasoning_level=str(params.get("reasoningLevel") or "").strip() or None,
@@ -1078,6 +1079,28 @@ def create_app(
                 return {"id": req_id, "ok": cached.ok, "payload": cached.payload, "error": cached.error}
             dag_raw = params.get("dag")
             dag = dict(dag_raw) if isinstance(dag_raw, dict) else None
+            sup_pl_raw = params.get("supervisorPipeline") or params.get("supervisor_pipeline")
+            supervisor_pipeline = (
+                [str(x) for x in sup_pl_raw if str(x).strip()]
+                if isinstance(sup_pl_raw, list)
+                else None
+            )
+            sup_llm_raw = params.get("supervisorLlm") or params.get("supervisor_llm")
+            supervisor_llm_dict = dict(sup_llm_raw) if isinstance(sup_llm_raw, dict) else None
+            sup_max_raw = params.get("supervisorMaxIterations") or params.get("supervisor_max_iterations")
+            try:
+                sup_run_max = int(sup_max_raw) if sup_max_raw is not None else None
+            except (TypeError, ValueError):
+                sup_run_max = None
+            sup_llm_retries_raw = params.get("supervisorLlmMaxRetries") or params.get(
+                "supervisor_llm_max_retries"
+            )
+            try:
+                sup_llm_retries_int = (
+                    int(sup_llm_retries_raw) if sup_llm_retries_raw is not None else None
+                )
+            except (TypeError, ValueError):
+                sup_llm_retries_int = None
             try:
                 st = orchestrator.create(
                     session_key=session_key,
@@ -1087,6 +1110,10 @@ def create_app(
                     strategy=strategy,
                     router_llm=router_llm,
                     dag=dag,
+                    supervisor_pipeline=supervisor_pipeline,
+                    supervisor_llm=supervisor_llm_dict,
+                    supervisor_max_iterations=sup_run_max,
+                    supervisor_llm_max_retries=sup_llm_retries_int,
                 )
                 orchestrator.send(orch_id=st.orchId, message=message)
             except ValueError as e:
@@ -1124,6 +1151,28 @@ def create_app(
                 return {"id": req_id, "ok": cached.ok, "payload": cached.payload, "error": cached.error}
             dag_raw = params.get("dag")
             dag = dict(dag_raw) if isinstance(dag_raw, dict) else None
+            sup_pl_raw = params.get("supervisorPipeline") or params.get("supervisor_pipeline")
+            supervisor_pipeline = (
+                [str(x) for x in sup_pl_raw if str(x).strip()]
+                if isinstance(sup_pl_raw, list)
+                else None
+            )
+            sup_llm_raw = params.get("supervisorLlm") or params.get("supervisor_llm")
+            supervisor_llm_dict = dict(sup_llm_raw) if isinstance(sup_llm_raw, dict) else None
+            sup_max_raw = params.get("supervisorMaxIterations") or params.get("supervisor_max_iterations")
+            try:
+                sup_max_int = int(sup_max_raw) if sup_max_raw is not None else None
+            except (TypeError, ValueError):
+                sup_max_int = None
+            sup_llm_retries_raw = params.get("supervisorLlmMaxRetries") or params.get(
+                "supervisor_llm_max_retries"
+            )
+            try:
+                sup_llm_retries_int = (
+                    int(sup_llm_retries_raw) if sup_llm_retries_raw is not None else None
+                )
+            except (TypeError, ValueError):
+                sup_llm_retries_int = None
             try:
                 st = orchestrator.create(
                     session_key=session_key,
@@ -1133,6 +1182,10 @@ def create_app(
                     strategy=strategy,
                     router_llm=router_llm,
                     dag=dag,
+                    supervisor_pipeline=supervisor_pipeline,
+                    supervisor_llm=supervisor_llm_dict,
+                    supervisor_max_iterations=sup_max_int,
+                    supervisor_llm_max_retries=sup_llm_retries_int,
                 )
             except ValueError as e:
                 return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": str(e)}}
@@ -1172,6 +1225,28 @@ def create_app(
                 return {"id": req_id, "ok": cached.ok, "payload": cached.payload, "error": cached.error}
             dag_raw = params.get("dag")
             dag = dict(dag_raw) if isinstance(dag_raw, dict) else None
+            sup_pl_raw = params.get("supervisorPipeline") or params.get("supervisor_pipeline")
+            supervisor_pipeline = (
+                [str(x) for x in sup_pl_raw if str(x).strip()]
+                if isinstance(sup_pl_raw, list)
+                else None
+            )
+            sup_llm_raw = params.get("supervisorLlm") or params.get("supervisor_llm")
+            supervisor_llm_dict = dict(sup_llm_raw) if isinstance(sup_llm_raw, dict) else None
+            sup_max_raw = params.get("supervisorMaxIterations") or params.get("supervisor_max_iterations")
+            try:
+                sup_max_int = int(sup_max_raw) if sup_max_raw is not None else None
+            except (TypeError, ValueError):
+                sup_max_int = None
+            sup_llm_retries_raw = params.get("supervisorLlmMaxRetries") or params.get(
+                "supervisor_llm_max_retries"
+            )
+            try:
+                sup_llm_retries_int = (
+                    int(sup_llm_retries_raw) if sup_llm_retries_raw is not None else None
+                )
+            except (TypeError, ValueError):
+                sup_llm_retries_int = None
             try:
                 st = orchestrator.update(
                     orch_id,
@@ -1182,6 +1257,10 @@ def create_app(
                     strategy=strategy,
                     router_llm=router_llm,
                     dag=dag,
+                    supervisor_pipeline=supervisor_pipeline,
+                    supervisor_llm=supervisor_llm_dict,
+                    supervisor_max_iterations=sup_max_int,
+                    supervisor_llm_max_retries=sup_llm_retries_int,
                 )
             except ValueError as e:
                 return {
@@ -1248,6 +1327,16 @@ def create_app(
                 router_key_configured = bool(
                     str(rl.get("api_key") or rl.get("apiKey") or "").strip()
                 )
+            sl = getattr(st, "supervisorLlm", None)
+            supervisor_public = None
+            supervisor_key_configured = False
+            if isinstance(sl, dict) and sl:
+                supervisor_public = {
+                    k: v for k, v in sl.items() if k not in ("api_key", "apiKey")
+                }
+                supervisor_key_configured = bool(
+                    str(sl.get("api_key") or sl.get("apiKey") or "").strip()
+                )
             payload = {
                 "orchId": st.orchId,
                 "name": st.name,
@@ -1267,6 +1356,13 @@ def create_app(
                 "dagParallelism": getattr(st, "dagParallelism", 4),
                 "routerLlm": router_public,
                 "routerApiKeyConfigured": router_key_configured,
+                "supervisorPipeline": list(getattr(st, "supervisorPipeline", None) or []),
+                "supervisorMaxIterations": int(getattr(st, "supervisorMaxIterations", 5) or 5),
+                "supervisorLlmMaxRetries": int(getattr(st, "supervisorLlmMaxRetries", 12) or 12),
+                "supervisorIteration": int(getattr(st, "supervisorIteration", 0) or 0),
+                "supervisorLastDecision": getattr(st, "supervisorLastDecision", None),
+                "supervisorLlm": supervisor_public,
+                "supervisorApiKeyConfigured": supervisor_key_configured,
             }
             return {"id": req_id, "ok": True, "payload": payload}
 
@@ -1422,10 +1518,19 @@ def create_app(
             # Return current tools policy config for dashboard inspection.
             try:
                 from ..config import get_default_config_manager
-                from ..agents.tools.policy import resolve_tool_policy_config
+                from ..agents.tools.policy import (
+                    resolve_sandbox_tool_policy_config,
+                    resolve_tool_policy_config,
+                )
+                from ..agents.tools.sandbox_workspace import resolve_sandbox_sessions_root
 
                 cfg_mgr = get_default_config_manager()
                 base_policy = resolve_tool_policy_config(cfg_mgr)
+                sandbox_policy = resolve_sandbox_tool_policy_config(cfg_mgr)
+                try:
+                    sandbox_root = resolve_sandbox_sessions_root(cfg_mgr)
+                except Exception:
+                    sandbox_root = None
                 raw_tools = cfg_mgr.read_config("tools", default={})
             except Exception as e:
                 return {
@@ -1438,6 +1543,14 @@ def create_app(
                     "profile": base_policy.profile,
                     "allow": base_policy.allow,
                     "deny": base_policy.deny,
+                },
+                "sandboxPolicy": {
+                    "enabled": sandbox_policy.enabled,
+                    "allow": sandbox_policy.allow,
+                    "deny": sandbox_policy.deny,
+                    "directoryIsolation": sandbox_policy.directory_isolation,
+                    "executionIsolation": sandbox_policy.execution_isolation,
+                    "resolvedWorkspaceRoot": sandbox_root,
                 },
                 "raw": raw_tools,
             }

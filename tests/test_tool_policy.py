@@ -10,9 +10,12 @@ if REPO_ROOT not in sys.path:
 from mw4agent.agents.tools.base import AgentTool
 from mw4agent.agents.tools.policy import (
     ToolPolicyConfig,
+    SandboxToolPolicy,
     filter_tools_by_policy,
+    filter_tools_by_sandbox_policy,
     resolve_effective_policy_for_context,
     resolve_effective_allow_patterns,
+    resolve_sandbox_tool_policy_config,
 )
 
 
@@ -124,4 +127,39 @@ def test_coding_profile_allows_feishu_plugin_tools_via_glob():
     names = {t.name for t in allowed}
     assert "feishu_fetch_doc" in names
     assert "read" in names
+
+
+def test_sandbox_tool_policy_directory_isolation_defaults():
+    p = SandboxToolPolicy(enabled=True, allow=["read"], deny=None, directory_isolation=None)
+    assert p.should_isolate_directories(run_sandbox_request=False) is True
+    assert p.should_isolate_directories(run_sandbox_request=True) is True
+
+    p2 = SandboxToolPolicy(enabled=True, directory_isolation=False)
+    assert p2.should_isolate_directories(run_sandbox_request=True) is False
+
+    p3 = SandboxToolPolicy(enabled=False, directory_isolation=None)
+    assert p3.should_isolate_directories(run_sandbox_request=True) is True
+
+
+def test_filter_tools_by_sandbox_policy_deny_wins():
+    tools = _make_tools()
+    sb = SandboxToolPolicy(enabled=True, allow=["*"], deny=["write"])
+    out = filter_tools_by_sandbox_policy(tools, sb)
+    assert {t.name for t in out} == {"read", "memory_search", "gateway_ls"}
+
+
+def test_resolve_sandbox_tool_policy_config_execution_isolation():
+    cfg_mgr = DummyCfgManager(
+        {
+            "sandbox": {
+                "enabled": True,
+                "executionIsolation": "wasm",
+                "directoryIsolation": False,
+            }
+        }
+    )
+    sb = resolve_sandbox_tool_policy_config(cfg_mgr)
+    assert sb.enabled is True
+    assert sb.execution_isolation == "wasm"
+    assert sb.directory_isolation is False
 

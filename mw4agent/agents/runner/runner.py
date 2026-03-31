@@ -24,16 +24,25 @@ from ..types import (
 from ..session.manager import SessionManager
 from ..tools.registry import get_tool_registry
 from ..tools.base import ToolResult
-from ..tools.policy import resolve_tool_policy_config, resolve_effective_policy_for_context, filter_tools_by_policy, resolve_effective_allow_patterns
+from ..tools.policy import (
+    filter_tools_by_policy,
+    filter_tools_by_sandbox_policy,
+    is_tool_allowed_by_sandbox,
+    resolve_effective_allow_patterns,
+    resolve_effective_policy_for_context,
+    resolve_sandbox_tool_policy_config,
+    resolve_tool_policy_config,
+)
+from ..tools.sandbox_workspace import ensure_sandbox_tool_workspace
 from ..tools.timeout_defaults import resolve_default_tool_timeout_ms
 from ..tools.fs_policy import resolve_tool_fs_policy_config
 from ..queue.manager import CommandQueue
 from ..events.stream import EventStream
+from ...config import get_default_config_manager
 from ...config.paths import resolve_agent_workspace_dir
 from ...llm import generate_reply, generate_reply_with_tools, LLMUsage
 from ..reasoning import split_reasoning_and_text
 from ..skills.snapshot import build_skill_snapshot
-from ..tools.policy import resolve_tool_policy_config, filter_tools_by_policy
 
 from mw4agent.log import get_logger
 logger = get_logger(__name__)
@@ -409,10 +418,42 @@ class AgentRunner:
 
         started = time.time()
 
+        cfg_mgr = get_default_config_manager()
+        agent_workspace_dir = _resolve_run_workspace_dir(params)
+        sandbox_policy = resolve_sandbox_tool_policy_config(cfg_mgr)
+        run_sandbox = bool(params.sandbox is True)
+        if run_sandbox and not sandbox_policy.enabled:
+            sandbox_policy.enabled = True
+
+        directory_isolation_active = False
+        if sandbox_policy.should_isolate_directories(run_sandbox_request=run_sandbox):
+            _, tool_workspace_dir = ensure_sandbox_tool_workspace(
+                cfg_manager=cfg_mgr,
+                agent_id=params.agent_id,
+                session_id=str(session_entry.session_id),
+            )
+            directory_isolation_active = True
+        else:
+            tool_workspace_dir = agent_workspace_dir
+
+        fs_policy = resolve_tool_fs_policy_config(cfg_mgr)
+        tools_fs_workspace_only_effective = (
+            fs_policy.workspace_only or directory_isolation_active
+        )
+
+        if (
+            sandbox_policy.execution_isolation
+            and str(sandbox_policy.execution_isolation).strip().lower() == "wasm"
+        ):
+            logger.info(
+                "sandbox executionIsolation=wasm is set; WASM execution is not implemented yet — "
+                "tools still run on the host under directory isolation rules"
+            )
+
         # --- Attach skills snapshot to session & build prompt --------------
         # logger.info(f"Building skills snapshot for session {session_entry.session_id}")
         skills_snapshot = build_skill_snapshot(
-            workspace_dir=_resolve_run_workspace_dir(params)
+            workspace_dir=agent_workspace_dir
         )
         skills_prompt = ''
         if skills_snapshot.get("prompt"):
@@ -474,9 +515,6 @@ class AgentRunner:
             # For direct tool-call protocol runs, still honor tools policy so
             # implementations can relax internal guards (e.g. workspace root) in
             # profile=full.
-            from ...config import get_default_config_manager
-
-            cfg_mgr = get_default_config_manager()
             base_policy = resolve_tool_policy_config(cfg_mgr)
             effective_policy = resolve_effective_policy_for_context(
                 cfg_mgr,
@@ -486,19 +524,29 @@ class AgentRunner:
                 sender_is_owner=params.sender_is_owner,
                 command_authorized=params.command_authorized,
             )
-            fs_policy = resolve_tool_fs_policy_config(cfg_mgr)
 
             tool_context = {
                 "run_id": run_id,
                 "session_key": params.session_key,
+                "session_id": str(session_entry.session_id),
                 "agent_id": params.agent_id,
-                "workspace_dir": _resolve_run_workspace_dir(params),
+                "workspace_dir": tool_workspace_dir,
+                "agent_workspace_dir": agent_workspace_dir,
                 "tools_profile": effective_policy.profile,
                 "tools_allow": resolve_effective_allow_patterns(effective_policy),
                 "tools_deny": effective_policy.deny,
-                "tools_fs_workspace_only": fs_policy.workspace_only,
+                "sandbox_enabled": sandbox_policy.enabled,
+                "sandbox_allow": sandbox_policy.allow,
+                "sandbox_deny": sandbox_policy.deny,
+                "sandbox_directory_isolation": directory_isolation_active,
+                "sandbox_execution_isolation": sandbox_policy.execution_isolation,
+                "tools_fs_workspace_only": tools_fs_workspace_only_effective,
                 "default_tool_timeout_ms": resolve_default_tool_timeout_ms(),
             }
+            if sandbox_policy.enabled and not is_tool_allowed_by_sandbox(
+                sandbox_policy, tool_name
+            ):
+                raise ValueError(f"Tool '{tool_name}' blocked by sandbox policy")
             tool_result = await self.execute_tool(
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -545,9 +593,7 @@ class AgentRunner:
             )
         else:
             # No tool plan → try tool-call loop if we have tools and non-echo provider.
-            from ...config import get_default_config_manager
             logger.info(f"  --> agent_turn no tool plan ")
-            cfg_mgr = get_default_config_manager()
             # --- Session short-term memory (transcript history) ----------------
             # Resolve transcript path from session store to keep store+transcripts colocated.
             # - MultiAgentSessionManager: ~/.mw4agent/agents/<agentId>/sessions/<sessionId>.jsonl
@@ -583,7 +629,7 @@ class AgentRunner:
                 root_cfg=root_cfg if isinstance(root_cfg, dict) else {},
                 transcript_file=transcript_file,
                 transcript_session_id=session_entry.session_id,
-                transcript_cwd=_resolve_run_workspace_dir(params),
+                transcript_cwd=agent_workspace_dir,
             )
 
             history_limit = resolve_history_limit_turns(
@@ -601,8 +647,6 @@ class AgentRunner:
                 sender_is_owner=params.sender_is_owner,
                 command_authorized=params.command_authorized,
             )
-            fs_policy = resolve_tool_fs_policy_config(cfg_mgr)
-
             all_tools = self.tool_registry.list_tools()
             tools_after_policy = filter_tools_by_policy(all_tools, effective_policy)
             # Enforce owner_only at runtime: non-owner callers看不到 owner_only 工具
@@ -611,15 +655,18 @@ class AgentRunner:
             # Do not expose web_search unless explicitly enabled (avoids unexpected external calls).
             if not is_web_search_enabled():
                 tools_after_policy = [t for t in tools_after_policy if t.name != "web_search"]
+            # Sandbox tool policy (optional) sits on top of normal policy.
+            tools_after_policy = filter_tools_by_sandbox_policy(tools_after_policy, sandbox_policy)
 
             tool_definitions = [t.to_dict() for t in tools_after_policy]
 
             tool_context = {
                 "run_id": run_id,
                 "session_key": params.session_key,
-                "session_id": session_entry.session_id,
+                "session_id": str(session_entry.session_id),
                 "agent_id": params.agent_id,
-                "workspace_dir": _resolve_run_workspace_dir(params),
+                "workspace_dir": tool_workspace_dir,
+                "agent_workspace_dir": agent_workspace_dir,
                 "channel": params.channel,
                 "sender_id": params.sender_id,
                 "sender_is_owner": params.sender_is_owner,
@@ -627,7 +674,12 @@ class AgentRunner:
                 "tools_profile": effective_policy.profile,
                 "tools_allow": resolve_effective_allow_patterns(effective_policy),
                 "tools_deny": effective_policy.deny,
-                "tools_fs_workspace_only": fs_policy.workspace_only,
+                "sandbox_enabled": sandbox_policy.enabled,
+                "sandbox_allow": sandbox_policy.allow,
+                "sandbox_deny": sandbox_policy.deny,
+                "sandbox_directory_isolation": directory_isolation_active,
+                "sandbox_execution_isolation": sandbox_policy.execution_isolation,
+                "tools_fs_workspace_only": tools_fs_workspace_only_effective,
                 "default_tool_timeout_ms": resolve_default_tool_timeout_ms(),
             }
             use_tool_loop = bool(tool_definitions)
@@ -642,7 +694,7 @@ class AgentRunner:
                     history_messages=history_messages,
                     transcript_file=transcript_file,
                     transcript_session_id=session_entry.session_id,
-                    transcript_cwd=tool_context.get("workspace_dir") or "",
+                    transcript_cwd=agent_workspace_dir,
                 )
             else:
                 logger.info(f"  --> llm return no tool plan ")
@@ -675,7 +727,7 @@ class AgentRunner:
                 append_transcript_messages(
                     transcript_file=transcript_file,
                     session_id=session_entry.session_id,
-                    cwd=tool_context.get("workspace_dir") or "",
+                    cwd=agent_workspace_dir,
                     messages=[user_msg, {"role": "assistant", "content": reply_text or ""}],
                 )
 
@@ -951,6 +1003,26 @@ class AgentRunner:
         tool = self.tool_registry.get_tool(normalized_tool_name)
         if not tool:
             raise ValueError(f"Tool '{tool_name}' not found")
+
+        # Defense in depth: enforce sandbox policy at execution time too.
+        try:
+            sandbox_enabled = bool((context or {}).get("sandbox_enabled") is True)
+            if sandbox_enabled:
+                from ..tools.policy import SandboxToolPolicy, is_tool_allowed_by_sandbox
+
+                policy = SandboxToolPolicy(
+                    enabled=True,
+                    allow=(context or {}).get("sandbox_allow"),
+                    deny=(context or {}).get("sandbox_deny"),
+                )
+                if not is_tool_allowed_by_sandbox(policy, normalized_tool_name):
+                    raise ValueError(
+                        f"Tool '{normalized_tool_name}' blocked by sandbox policy"
+                    )
+        except Exception:
+            # If sandbox context is malformed, fail closed when sandbox_enabled is set.
+            if bool((context or {}).get("sandbox_enabled") is True):
+                raise
 
         run_id_for_stream = (context or {}).get("run_id")
         started_at_ms = int(time.time() * 1000)

@@ -491,6 +491,16 @@ export type OrchestrateRunBody = {
     api_key?: string;
     thinking_level?: string;
   };
+  supervisorPipeline?: string[];
+  supervisorLlm?: {
+    provider?: string;
+    model?: string;
+    base_url?: string;
+    api_key?: string;
+    thinking_level?: string;
+  };
+  supervisorMaxIterations?: number;
+  supervisorLlmMaxRetries?: number;
   idempotencyKey: string;
 };
 
@@ -510,6 +520,10 @@ export async function orchestrateRun(
     strategy: body.strategy,
     dag: body.dag,
     routerLlm: body.routerLlm,
+    supervisorPipeline: body.supervisorPipeline,
+    supervisorLlm: body.supervisorLlm,
+    supervisorMaxIterations: body.supervisorMaxIterations,
+    supervisorLlmMaxRetries: body.supervisorLlmMaxRetries,
     idempotencyKey: body.idempotencyKey,
   });
   if (!r.ok || !r.payload) {
@@ -537,6 +551,18 @@ export type OrchestrateCreateBody = {
     api_key?: string;
     thinking_level?: string;
   };
+  /** Order = pipeline A→B→C for ``strategy: supervisor_pipeline`` */
+  supervisorPipeline?: string[];
+  supervisorLlm?: {
+    provider?: string;
+    model?: string;
+    base_url?: string;
+    api_key?: string;
+    thinking_level?: string;
+  };
+  supervisorMaxIterations?: number;
+  /** Retries after a failed/empty supervisor HTTP call; 10s between attempts. */
+  supervisorLlmMaxRetries?: number;
   idempotencyKey: string;
 };
 
@@ -555,6 +581,10 @@ export async function orchestrateCreate(
     strategy: body.strategy,
     dag: body.dag,
     routerLlm: body.routerLlm,
+    supervisorPipeline: body.supervisorPipeline,
+    supervisorLlm: body.supervisorLlm,
+    supervisorMaxIterations: body.supervisorMaxIterations,
+    supervisorLlmMaxRetries: body.supervisorLlmMaxRetries,
     idempotencyKey: body.idempotencyKey,
   });
   if (!r.ok || !r.payload) {
@@ -586,6 +616,10 @@ export async function orchestrateUpdate(
     strategy: body.strategy,
     dag: body.dag,
     routerLlm: body.routerLlm,
+    supervisorPipeline: body.supervisorPipeline,
+    supervisorLlm: body.supervisorLlm,
+    supervisorMaxIterations: body.supervisorMaxIterations,
+    supervisorLlmMaxRetries: body.supervisorLlmMaxRetries,
     idempotencyKey: body.idempotencyKey,
   });
   if (!r.ok || !r.payload) {
@@ -669,6 +703,13 @@ export type OrchestrateGetResult =
       /** Excludes ``api_key``; use ``routerApiKeyConfigured`` when editing. */
       routerLlm?: OrchestrateRouterLlmPublic | null;
       routerApiKeyConfigured?: boolean;
+      supervisorPipeline?: string[];
+      supervisorMaxIterations?: number;
+      supervisorLlmMaxRetries?: number;
+      supervisorIteration?: number;
+      supervisorLastDecision?: Record<string, unknown> | null;
+      supervisorLlm?: OrchestrateRouterLlmPublic | null;
+      supervisorApiKeyConfigured?: boolean;
     }
   | { ok: false; error?: string };
 
@@ -709,6 +750,28 @@ export async function orchestrateGet(orchId: string): Promise<OrchestrateGetResu
         ? (p.routerLlm as OrchestrateRouterLlmPublic)
         : undefined,
     routerApiKeyConfigured: Boolean(p.routerApiKeyConfigured),
+    supervisorPipeline: Array.isArray(p.supervisorPipeline)
+      ? (p.supervisorPipeline as string[])
+      : undefined,
+    supervisorMaxIterations:
+      typeof p.supervisorMaxIterations === "number"
+        ? p.supervisorMaxIterations
+        : undefined,
+    supervisorLlmMaxRetries:
+      typeof p.supervisorLlmMaxRetries === "number"
+        ? p.supervisorLlmMaxRetries
+        : undefined,
+    supervisorIteration:
+      typeof p.supervisorIteration === "number" ? p.supervisorIteration : undefined,
+    supervisorLastDecision:
+      p.supervisorLastDecision != null && typeof p.supervisorLastDecision === "object"
+        ? (p.supervisorLastDecision as Record<string, unknown>)
+        : undefined,
+    supervisorLlm:
+      p.supervisorLlm != null && typeof p.supervisorLlm === "object"
+        ? (p.supervisorLlm as OrchestrateRouterLlmPublic)
+        : undefined,
+    supervisorApiKeyConfigured: Boolean(p.supervisorApiKeyConfigured),
   };
 }
 

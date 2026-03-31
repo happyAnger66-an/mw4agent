@@ -20,6 +20,13 @@ from ..memory.bootstrap import load_bootstrap_system_prompt
 
 from .dag_spec import MAX_UPSTREAM_SNIPPET, normalize_dag_dict
 
+# Supervisor LLM: delay between retries after connection/transport/empty response failures.
+_SUPERVISOR_LLM_RETRY_DELAY_S = 10.0
+
+
+async def _supervisor_retry_delay() -> None:
+    await asyncio.sleep(_SUPERVISOR_LLM_RETRY_DELAY_S)
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -62,7 +69,7 @@ class OrchState:
     updatedAt: int
     status: str  # idle|running|error|aborted
     name: str = ""
-    strategy: str = "round_robin"  # round_robin|router_llm|dag
+    strategy: str = "round_robin"  # round_robin|router_llm|dag|supervisor_pipeline
     maxRounds: int = 8  # round_robin: assistant turns per user message; dag: largely ignored (one run per node)
     routerLlm: Optional[Dict[str, str]] = None
     participants: List[str] = field(default_factory=list)
@@ -80,6 +87,51 @@ class OrchState:
     # Next linear run: reply only from this agent (round_robin / router_llm), then cleared
     pendingDirectAgent: Optional[str] = None
     pendingSingleTurn: bool = False
+    # supervisor_pipeline: ordered stroke A→B→C, then supervisor LLM continue/stop
+    supervisorPipeline: List[str] = field(default_factory=list)
+    supervisorLlm: Optional[Dict[str, str]] = None
+    supervisorMaxIterations: int = 5
+    # After a failed or empty supervisor HTTP call, wait _SUPERVISOR_LLM_RETRY_DELAY_S and retry; at most this many retries (not counting the first attempt).
+    supervisorLlmMaxRetries: int = 12
+    supervisorIteration: int = 0
+    supervisorLastDecision: Optional[Dict[str, Any]] = None
+
+
+def _truncate_text(s: str, max_len: int) -> str:
+    t = (s or "").strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max(0, max_len - 1)] + "…"
+
+
+def _parse_supervisor_decision(raw: str) -> Dict[str, Any]:
+    """Parse supervisor JSON (optional ``` fences). Raises ValueError on failure."""
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError("empty supervisor reply")
+    if s.startswith("```"):
+        lines = s.split("\n")
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        s = "\n".join(lines).strip()
+    try:
+        obj = json.loads(s)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"supervisor JSON: {e}") from e
+    if not isinstance(obj, dict):
+        raise ValueError("supervisor reply must be a JSON object")
+    action = str(obj.get("action") or "").strip().lower()
+    if action not in ("continue", "stop"):
+        raise ValueError("supervisor action must be continue or stop")
+    out: Dict[str, Any] = {"action": action, "reason": str(obj.get("reason") or "").strip()}
+    if action == "continue":
+        b = str(obj.get("brief_for_next_stroke") or obj.get("brief") or "").strip()
+        out["brief_for_next_stroke"] = b
+    if obj.get("final_user_visible_summary") is not None:
+        out["final_user_visible_summary"] = str(obj.get("final_user_visible_summary") or "").strip()
+    return out
 
 
 class Orchestrator:
@@ -211,6 +263,38 @@ class Orchestrator:
             pd_agent = normalize_agent_id(pd_raw.strip())
         ps_raw = data.get("pendingSingleTurn")
         pending_single = ps_raw is True or str(ps_raw).lower() in ("1", "true", "yes")
+        sp_raw = data.get("supervisorPipeline") or data.get("supervisor_pipeline")
+        sup_pipeline: List[str] = []
+        if isinstance(sp_raw, list):
+            sup_pipeline = [
+                normalize_agent_id(str(x).strip())
+                for x in sp_raw
+                if str(x).strip()
+            ]
+        sup_llm_raw = data.get("supervisorLlm") or data.get("supervisor_llm")
+        sup_llm: Optional[Dict[str, str]] = None
+        if isinstance(sup_llm_raw, dict) and sup_llm_raw:
+            sup_llm = {str(k): str(v) for k, v in sup_llm_raw.items() if v is not None}
+        try:
+            smi = int(data.get("supervisorMaxIterations") or data.get("supervisor_max_iterations") or 5)
+        except (TypeError, ValueError):
+            smi = 5
+        smi = max(1, min(64, smi))
+        try:
+            smr = int(
+                data.get("supervisorLlmMaxRetries")
+                or data.get("supervisor_llm_max_retries")
+                or 12
+            )
+        except (TypeError, ValueError):
+            smr = 12
+        smr = max(0, min(64, smr))
+        try:
+            s_iter = int(data.get("supervisorIteration") or data.get("supervisor_iteration") or 0)
+        except (TypeError, ValueError):
+            s_iter = 0
+        s_last = data.get("supervisorLastDecision") or data.get("supervisor_last_decision")
+        s_decision: Optional[Dict[str, Any]] = dict(s_last) if isinstance(s_last, dict) else None
         return OrchState(
             orchId=str(data.get("orchId") or orch_id),
             sessionKey=str(data.get("sessionKey") or ""),
@@ -234,6 +318,12 @@ class Orchestrator:
             orchReasoningLevel=orch_rl,
             pendingDirectAgent=pd_agent,
             pendingSingleTurn=pending_single,
+            supervisorPipeline=sup_pipeline,
+            supervisorLlm=sup_llm,
+            supervisorMaxIterations=smi,
+            supervisorLlmMaxRetries=smr,
+            supervisorIteration=s_iter,
+            supervisorLastDecision=s_decision,
         )
 
     def get(self, orch_id: str) -> Optional[OrchState]:
@@ -284,6 +374,10 @@ class Orchestrator:
         strategy: str = "round_robin",
         router_llm: Optional[Dict[str, str]] = None,
         dag: Optional[Dict[str, Any]] = None,
+        supervisor_pipeline: Optional[List[str]] = None,
+        supervisor_llm: Optional[Dict[str, str]] = None,
+        supervisor_max_iterations: Optional[int] = None,
+        supervisor_llm_max_retries: Optional[int] = None,
     ) -> OrchState:
         orch_id = str(uuid.uuid4())
         strat = (strategy or "round_robin").strip() or "round_robin"
@@ -291,6 +385,20 @@ class Orchestrator:
         dag_progress: Optional[Dict[str, Any]] = None
         dag_parallelism = 4
         dag_node_sess: Dict[str, str] = {}
+        sup_pipeline: List[str] = []
+        sup_llm: Optional[Dict[str, str]] = None
+        try:
+            smi_default = int(supervisor_max_iterations) if supervisor_max_iterations is not None else 5
+        except (TypeError, ValueError):
+            smi_default = 5
+        smi_default = max(1, min(64, smi_default))
+        try:
+            smr_default = (
+                int(supervisor_llm_max_retries) if supervisor_llm_max_retries is not None else 12
+            )
+        except (TypeError, ValueError):
+            smr_default = 12
+        smr_default = max(0, min(64, smr_default))
 
         if dag is not None:
             dag_spec = normalize_dag_dict(dag if isinstance(dag, dict) else {})
@@ -307,14 +415,28 @@ class Orchestrator:
             }
             dag_node_sess = {str(n["id"]): str(uuid.uuid4()) for n in dag_spec["nodes"]}
             agent_sess = {p: str(uuid.uuid4()) for p in parts}
+            router_final = dict(router_llm) if isinstance(router_llm, dict) and router_llm else None
         else:
             if strat.lower() == "dag":
                 raise ValueError("dag spec is required when strategy is dag")
-            parts = [normalize_agent_id(x) for x in participants if str(x).strip()]
-            parts = [p for i, p in enumerate(parts) if p and p not in parts[:i]]
-            if not parts:
-                parts = ["main"]
-            agent_sess = {p: str(uuid.uuid4()) for p in parts}
+            if strat.lower() == "supervisor_pipeline":
+                src = supervisor_pipeline if supervisor_pipeline else participants
+                pl = [normalize_agent_id(str(x).strip()) for x in src if str(x).strip()]
+                if not pl:
+                    raise ValueError("supervisor_pipeline requires at least one agent")
+                parts = list(dict.fromkeys(pl))
+                agent_sess = {p: str(uuid.uuid4()) for p in parts}
+                sup_pipeline = pl
+                sup_llm = dict(supervisor_llm) if isinstance(supervisor_llm, dict) and supervisor_llm else None
+                strat = "supervisor_pipeline"
+                router_final = None
+            else:
+                parts = [normalize_agent_id(x) for x in participants if str(x).strip()]
+                parts = [p for i, p in enumerate(parts) if p and p not in parts[:i]]
+                if not parts:
+                    parts = ["main"]
+                agent_sess = {p: str(uuid.uuid4()) for p in parts}
+                router_final = dict(router_llm) if isinstance(router_llm, dict) and router_llm else None
 
         now = _now_ms()
         st = OrchState(
@@ -326,7 +448,7 @@ class Orchestrator:
             name=(name or "").strip(),
             strategy=strat,
             maxRounds=max(1, int(max_rounds or 8)),
-            routerLlm=(dict(router_llm) if isinstance(router_llm, dict) and router_llm else None),
+            routerLlm=router_final,
             participants=parts,
             agentSessions=agent_sess,
             currentRound=0,
@@ -338,7 +460,18 @@ class Orchestrator:
             dagNodeSessions=dag_node_sess,
             pendingDirectAgent=None,
             pendingSingleTurn=False,
+            supervisorPipeline=sup_pipeline,
+            supervisorLlm=sup_llm,
+            supervisorMaxIterations=smi_default if sup_pipeline else 5,
+            supervisorLlmMaxRetries=smr_default if sup_pipeline else 12,
+            supervisorIteration=0,
+            supervisorLastDecision=None,
         )
+        if dag is not None:
+            st.supervisorPipeline = []
+            st.supervisorLlm = None
+            st.supervisorMaxIterations = 5
+            st.supervisorLlmMaxRetries = 12
         self._save(st)
         return st
 
@@ -353,6 +486,10 @@ class Orchestrator:
         strategy: str = "round_robin",
         router_llm: Optional[Dict[str, str]] = None,
         dag: Optional[Dict[str, Any]] = None,
+        supervisor_pipeline: Optional[List[str]] = None,
+        supervisor_llm: Optional[Dict[str, str]] = None,
+        supervisor_max_iterations: Optional[int] = None,
+        supervisor_llm_max_retries: Optional[int] = None,
     ) -> OrchState:
         """Update orchestration metadata. Refuses when ``status == running``."""
         oid = (orch_id or "").strip()
@@ -394,23 +531,68 @@ class Orchestrator:
             old_as = dict(st.agentSessions or {})
             agent_sess = {p: old_as.get(p) or str(uuid.uuid4()) for p in parts}
             router_llm_out = None
+            st.supervisorPipeline = []
+            st.supervisorLlm = None
+            st.supervisorMaxIterations = 5
+            st.supervisorLlmMaxRetries = 12
+            st.supervisorIteration = 0
+            st.supervisorLastDecision = None
         else:
             if strat.lower() == "dag":
                 raise ValueError("dag spec is required when strategy is dag")
-            parts = [normalize_agent_id(x) for x in participants if str(x).strip()]
-            parts = [p for i, p in enumerate(parts) if p and p not in parts[:i]]
-            if not parts:
-                parts = ["main"]
-            old_as = dict(st.agentSessions or {})
-            agent_sess = {p: old_as.get(p) or str(uuid.uuid4()) for p in parts}
             dag_spec = None
             dag_progress = None
             dag_parallelism = 4
             dag_node_sess = {}
-            if strat == "router_llm":
-                router_llm_out = self._patch_router_llm(st.routerLlm, router_llm)
-            else:
+            if strat.lower() == "supervisor_pipeline":
+                src = supervisor_pipeline if supervisor_pipeline else participants
+                pl = [normalize_agent_id(str(x).strip()) for x in src if str(x).strip()]
+                if not pl:
+                    raise ValueError("supervisor_pipeline requires at least one agent")
+                parts = list(dict.fromkeys(pl))
+                old_as = dict(st.agentSessions or {})
+                agent_sess = {p: old_as.get(p) or str(uuid.uuid4()) for p in parts}
+                st.supervisorPipeline = pl
+                st.supervisorLlm = self._patch_router_llm(st.supervisorLlm, supervisor_llm)
+                try:
+                    smi = (
+                        int(supervisor_max_iterations)
+                        if supervisor_max_iterations is not None
+                        else int(st.supervisorMaxIterations or 5)
+                    )
+                except (TypeError, ValueError):
+                    smi = 5
+                st.supervisorMaxIterations = max(1, min(64, smi))
+                try:
+                    smr = (
+                        int(supervisor_llm_max_retries)
+                        if supervisor_llm_max_retries is not None
+                        else int(st.supervisorLlmMaxRetries or 12)
+                    )
+                except (TypeError, ValueError):
+                    smr = 12
+                st.supervisorLlmMaxRetries = max(0, min(64, smr))
+                st.supervisorIteration = 0
+                st.supervisorLastDecision = None
                 router_llm_out = None
+                strat = "supervisor_pipeline"
+            else:
+                parts = [normalize_agent_id(x) for x in participants if str(x).strip()]
+                parts = [p for i, p in enumerate(parts) if p and p not in parts[:i]]
+                if not parts:
+                    parts = ["main"]
+                old_as = dict(st.agentSessions or {})
+                agent_sess = {p: old_as.get(p) or str(uuid.uuid4()) for p in parts}
+                if strat == "router_llm":
+                    router_llm_out = self._patch_router_llm(st.routerLlm, router_llm)
+                else:
+                    router_llm_out = None
+                st.supervisorPipeline = []
+                st.supervisorLlm = None
+                st.supervisorMaxIterations = 5
+                st.supervisorLlmMaxRetries = 12
+                st.supervisorIteration = 0
+                st.supervisorLastDecision = None
 
         sk = (session_key or "").strip()
         st.sessionKey = sk or st.sessionKey
@@ -476,7 +658,7 @@ class Orchestrator:
             tid = normalize_agent_id(str(target_agent).strip())
             if tid in st.participants:
                 norm_target = tid
-        if strat == "dag":
+        if strat == "dag" or strat == "supervisor_pipeline":
             st.pendingDirectAgent = None
             st.pendingSingleTurn = False
         else:
@@ -515,6 +697,9 @@ class Orchestrator:
         st0 = self._load(orch_id)
         if st0 and (st0.strategy or "").strip() == "dag":
             self._tasks[orch_id] = asyncio.create_task(self._task_dag(orch_id))
+            return
+        if st0 and (st0.strategy or "").strip() == "supervisor_pipeline":
+            self._tasks[orch_id] = asyncio.create_task(self._task_supervisor_pipeline(orch_id))
             return
 
         async def _task_linear() -> None:
@@ -574,6 +759,7 @@ class Orchestrator:
                                 api_key=api_key or "none",
                                 base_url=base_url or "https://api.openai.com",
                                 extra_body=_thinking_extra_body(provider, thinking_level),
+                                agent_id=f"{orch_id}:router",
                             )
                             pick = (reply or "").strip().splitlines()[0].strip().strip("`").strip()
                             if pick in st.participants:
@@ -647,6 +833,258 @@ class Orchestrator:
                     self._save(st)
 
         self._tasks[orch_id] = asyncio.create_task(_task_linear())
+
+    def _supervisor_build_prompt(
+        self,
+        *,
+        original_user_text: str,
+        pipeline: List[str],
+        c_output: str,
+        macro: int,
+        max_macro: int,
+        brief_hint: str,
+    ) -> str:
+        pipe_s = " → ".join(pipeline)
+        tail = (
+            f"Supervisor brief from previous decision:\n{brief_hint}\n\n"
+            if (brief_hint or "").strip()
+            else ""
+        )
+        return (
+            "You are the orchestration supervisor. After each pipeline run (agents in fixed order), "
+            "decide whether to run another macro-iteration.\n\n"
+            f"User goal:\n{original_user_text}\n\n"
+            f"Pipeline order: {pipe_s}\n"
+            f"Macro-iteration index (0-based): {macro}\n"
+            f"Max macro-iterations (hard cap): {max_macro}\n\n"
+            f"Latest pipeline final output (last agent in order):\n{_truncate_text(c_output, 8000)}\n\n"
+            f"{tail}"
+            "Reply with ONLY valid JSON, no markdown:\n"
+            '{"action":"continue"|"stop","reason":"short",'
+            '"brief_for_next_stroke":"required when action is continue — concrete instruction for '
+            'the first pipeline agent on the next iteration",'
+            '"final_user_visible_summary":"optional when action is stop"}\n\n'
+            "Rules: If the user goal is satisfied, use action stop. "
+            "If more refinement is needed, use continue and a clear brief_for_next_stroke."
+        )
+
+    async def _supervisor_call_llm(self, orch_id: str, sup: Dict[str, str], prompt: str) -> str:
+        router = sup
+        provider = (router.get("provider") or "").strip() or "openai"
+        model = (router.get("model") or "").strip() or "gpt-4o-mini"
+        base_url = (router.get("base_url") or router.get("baseUrl") or "").strip()
+        api_key = (router.get("api_key") or router.get("apiKey") or "").strip()
+        thinking_level = (router.get("thinking_level") or router.get("thinkingLevel") or "").strip()
+        if provider not in ("", "echo") and provider not in list_providers():
+            provider = "openai"
+        reply, _usage = await asyncio.to_thread(
+            _call_openai_chat,
+            prompt,
+            model=model,
+            api_key=api_key or "none",
+            base_url=base_url or "https://api.openai.com",
+            extra_body=_thinking_extra_body(provider, thinking_level),
+            agent_id=f"{orch_id}:supervisor",
+        )
+        return reply or ""
+
+    async def _supervisor_call_llm_with_retries(
+        self,
+        orch_id: str,
+        sup: Dict[str, str],
+        prompt: str,
+        max_retries: int,
+    ) -> str:
+        """On transport/API failure or empty body, wait and retry.
+
+        ``max_retries``: number of retries after the first attempt (total calls ≤ 1 + max_retries).
+        """
+        mr = max(0, min(64, int(max_retries)))
+        last_exc: Optional[BaseException] = None
+        for attempt in range(mr + 1):
+            try:
+                raw = await self._supervisor_call_llm(orch_id, sup, prompt)
+                if (raw or "").strip():
+                    return raw
+                raise ValueError("empty supervisor LLM response")
+            except Exception as e:
+                last_exc = e
+                if attempt < mr:
+                    await _supervisor_retry_delay()
+                else:
+                    break
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("supervisor LLM retry exhausted")
+
+    async def _task_supervisor_pipeline(self, orch_id: str) -> None:
+        c_output = ""
+        try:
+            st = self._load(orch_id)
+            if not st or st.status != "running":
+                return
+            pipeline = [normalize_agent_id(x) for x in (st.supervisorPipeline or []) if str(x).strip()]
+            if not pipeline:
+                st.status = "error"
+                st.error = "supervisorPipeline is empty"
+                self._save(st)
+                return
+            sup = st.supervisorLlm or {}
+            if not sup:
+                st.status = "error"
+                st.error = "supervisorLlm is not configured"
+                self._save(st)
+                return
+            max_macro = max(1, min(64, int(st.supervisorMaxIterations or 5)))
+            max_sup_llm_retries = max(0, min(64, int(st.supervisorLlmMaxRetries or 12)))
+            user_msgs = [m for m in st.messages if m.role == "user"]
+            original_user_text = user_msgs[-1].text if user_msgs else ""
+            brief_for_next = ""
+            macro = 0
+            next_r = int(st.currentRound or 0) + 1
+
+            while macro < max_macro:
+                st = self._load(orch_id)
+                if not st or st.status != "running":
+                    return
+                if macro == 0:
+                    stroke_input = original_user_text
+                else:
+                    stroke_input = (
+                        f"{original_user_text}\n\n"
+                        f"[Supervisor macro-iteration {macro}]\n"
+                        f"{brief_for_next}\n\n"
+                        f"[Previous pipeline final output]\n{_truncate_text(c_output, 4000)}"
+                    )
+                last_text = stroke_input
+                for agent_id in pipeline:
+                    st = self._load(orch_id)
+                    if not st or st.status != "running":
+                        return
+                    session_id = st.agentSessions.get(agent_id) or str(uuid.uuid4())
+                    st.agentSessions[agent_id] = session_id
+                    cfg = self.agent_manager.get_or_create(agent_id)
+                    workspace_dir = cfg.workspace_dir
+                    bootstrap = load_bootstrap_system_prompt(workspace_dir)
+                    orch_hint = (
+                        "You are part of a multi-agent supervisor pipeline orchestration.\n"
+                        "Reply concisely, and include actionable outputs.\n"
+                    )
+                    extra_system_prompt = f"{bootstrap}\n\n{orch_hint}".strip() if bootstrap else orch_hint
+                    if agent_id == pipeline[0]:
+                        agent_message = _strip_at_mentions(last_text)
+                        if not agent_message.strip():
+                            agent_message = last_text
+                    else:
+                        agent_message = last_text
+                    result = await self.runner.run(
+                        AgentRunParams(
+                            message=agent_message,
+                            run_id=str(uuid.uuid4()),
+                            session_key=f"orch:{orch_id}",
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            channel="orchestrator",
+                            deliver=False,
+                            extra_system_prompt=extra_system_prompt,
+                            workspace_dir=workspace_dir,
+                            reasoning_level=self._reasoning_level_for_orch(st),
+                        )
+                    )
+                    out_text = "\n".join([p.text or "" for p in result.payloads if (p.text or "").strip()]).strip()
+                    if not out_text:
+                        out_text = "(no output)"
+                    last_text = out_text
+                    st = self._load(orch_id)
+                    if not st:
+                        return
+                    st.currentRound = next_r
+                    st.messages.append(
+                        OrchMessage(
+                            id=str(uuid.uuid4()),
+                            ts=_now_ms(),
+                            round=next_r,
+                            speaker=agent_id,
+                            role="assistant",
+                            text=out_text,
+                        )
+                    )
+                    next_r += 1
+                    self._save(st)
+                c_output = last_text
+                prompt = self._supervisor_build_prompt(
+                    original_user_text=original_user_text,
+                    pipeline=pipeline,
+                    c_output=c_output,
+                    macro=macro,
+                    max_macro=max_macro,
+                    brief_hint=brief_for_next,
+                )
+                raw = await self._supervisor_call_llm_with_retries(
+                    orch_id, sup, prompt, max_sup_llm_retries
+                )
+                try:
+                    decision = _parse_supervisor_decision(raw)
+                except ValueError as e:
+                    st = self._load(orch_id)
+                    if st:
+                        st.status = "error"
+                        st.error = f"supervisor: {e}"
+                        self._save(st)
+                    return
+                st = self._load(orch_id)
+                if not st or st.status != "running":
+                    return
+                st.supervisorIteration = macro + 1
+                st.supervisorLastDecision = decision
+                self._save(st)
+                if decision.get("action") == "stop":
+                    st = self._load(orch_id)
+                    if not st:
+                        return
+                    summary = str(decision.get("final_user_visible_summary") or "").strip()
+                    if summary:
+                        st.messages.append(
+                            OrchMessage(
+                                id=str(uuid.uuid4()),
+                                ts=_now_ms(),
+                                round=next_r,
+                                speaker="supervisor",
+                                role="assistant",
+                                text=summary,
+                            )
+                        )
+                        st.currentRound = next_r
+                        next_r += 1
+                    st.status = "idle"
+                    self._save(st)
+                    return
+                brief_for_next = str(decision.get("brief_for_next_stroke") or "").strip() or (
+                    "Refine using the last pipeline output; close gaps vs the user goal."
+                )
+                macro += 1
+
+            st = self._load(orch_id)
+            if st and st.status == "running":
+                st.status = "idle"
+                st.messages.append(
+                    OrchMessage(
+                        id=str(uuid.uuid4()),
+                        ts=_now_ms(),
+                        round=next_r,
+                        speaker="supervisor",
+                        role="assistant",
+                        text=f"Stopped after {max_macro} macro-iteration(s) (cap).",
+                    )
+                )
+                st.currentRound = next_r
+                self._save(st)
+        except Exception as e:
+            st = self._load(orch_id)
+            if st:
+                st.status = "error"
+                st.error = str(e)
+                self._save(st)
 
     async def _run_single_dag_node(
         self,

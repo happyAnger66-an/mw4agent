@@ -1,7 +1,5 @@
 "use client";
 
-import "@xyflow/react/dist/style.css";
-
 import {
   createContext,
   memo,

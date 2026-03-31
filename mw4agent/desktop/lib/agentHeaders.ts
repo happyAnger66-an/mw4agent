@@ -13,6 +13,9 @@ export const AGENT_HEADER_FILES: string[] = [
   "花生.png",
   "工程师.png",
   "工程师-程序员.png",
+  "manager.png",
+  "manager1.png",
+  "工人.png",
 ];
 
 export function agentHeaderSrc(basename: string): string {

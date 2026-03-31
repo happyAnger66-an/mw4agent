@@ -20,6 +20,7 @@ import {
   orchestrateList,
   orchestrateSend,
   orchestrateUpdate,
+  testLlmConnection,
   type ListedAgent,
   type AgentWsEvent,
   type OrchMessage,
@@ -192,7 +193,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
   const [createName, setCreateName] = useState("");
   const [createMaxRounds, setCreateMaxRounds] = useState("8");
   const [createStrategy, setCreateStrategy] = useState<
-    "round_robin" | "router_llm" | "dag"
+    "round_robin" | "router_llm" | "dag" | "supervisor_pipeline"
   >("round_robin");
   const [createDagSpec, setCreateDagSpec] = useState<OrchestrateDagSpec>(DEFAULT_DAG_SPEC);
   const [createDagJson, setCreateDagJson] = useState(() =>
@@ -210,6 +211,19 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
   const [routerApiKey, setRouterApiKey] = useState("");
   const [routerApiKeyConfigured, setRouterApiKeyConfigured] = useState(false);
   const [routerThinking, setRouterThinking] = useState("");
+  const [supervisorProvider, setSupervisorProvider] = useState("");
+  const [supervisorModel, setSupervisorModel] = useState("");
+  const [supervisorBaseUrl, setSupervisorBaseUrl] = useState("");
+  const [supervisorApiKey, setSupervisorApiKey] = useState("");
+  const [supervisorApiKeyConfigured, setSupervisorApiKeyConfigured] = useState(false);
+  const [supervisorThinking, setSupervisorThinking] = useState("");
+  const [createSupervisorMaxIter, setCreateSupervisorMaxIter] = useState("5");
+  const [createSupervisorLlmMaxRetries, setCreateSupervisorLlmMaxRetries] = useState("12");
+  const [supervisorLlmTestLoading, setSupervisorLlmTestLoading] = useState(false);
+  const [supervisorLlmTestBanner, setSupervisorLlmTestBanner] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
 
   const [input, setInput] = useState("");
   const [streamReasoning, setStreamReasoning] = useState(true);
@@ -488,7 +502,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     const parts = selected?.participants ?? [];
     const strat = (selected?.strategy || "").trim();
     const targetAgent =
-      strat !== "dag"
+      strat !== "dag" && strat !== "supervisor_pipeline"
         ? parseOrchestrateTargetAgent(msgText, parts)
         : undefined;
     try {
@@ -569,8 +583,44 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     setRouterApiKey("");
     setRouterApiKeyConfigured(false);
     setRouterThinking("");
+    setSupervisorProvider("");
+    setSupervisorModel("");
+    setSupervisorBaseUrl("http://127.0.0.1:8000/v1");
+    setSupervisorApiKey("");
+    setSupervisorApiKeyConfigured(false);
+    setSupervisorThinking("");
+    setCreateSupervisorMaxIter("5");
+    setCreateSupervisorLlmMaxRetries("12");
+    setSupervisorLlmTestBanner(null);
+    setSupervisorLlmTestLoading(false);
     setOrchFormOpen(true);
   }, []);
+
+  const runSupervisorLlmTest = useCallback(async () => {
+    setSupervisorLlmTestLoading(true);
+    setSupervisorLlmTestBanner(null);
+    const llm: Record<string, string> = {};
+    if (supervisorProvider.trim()) llm.provider = supervisorProvider.trim();
+    if (supervisorModel.trim()) llm.model = supervisorModel.trim();
+    if (supervisorBaseUrl.trim()) llm.base_url = supervisorBaseUrl.trim();
+    if (supervisorApiKey.trim()) llm.api_key = supervisorApiKey.trim();
+    if (supervisorThinking.trim()) llm.thinking_level = supervisorThinking.trim();
+    const r = await testLlmConnection({ llm });
+    setSupervisorLlmTestLoading(false);
+    if (!r.ok) {
+      setSupervisorLlmTestBanner({ ok: false, text: r.error || t("agentsError") });
+      return;
+    }
+    const detail = r.preview ? `${r.message} · ${r.preview}` : r.message;
+    setSupervisorLlmTestBanner({ ok: r.success, text: detail });
+  }, [
+    supervisorApiKey,
+    supervisorBaseUrl,
+    supervisorModel,
+    supervisorProvider,
+    supervisorThinking,
+    t,
+  ]);
 
   const openEdit = useCallback(
     async (o: OrchestrateListItem) => {
@@ -579,14 +629,22 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
         return;
       }
       setError(null);
+      setSupervisorLlmTestBanner(null);
+      setSupervisorLlmTestLoading(false);
       const r = await orchestrateGet(o.orchId);
       if (!r.ok) {
         setError(r.error || t("orchestrateError"));
         return;
       }
       const s = (r.strategy || "round_robin").trim();
-      const strat: "round_robin" | "router_llm" | "dag" =
-        s === "dag" ? "dag" : s === "router_llm" ? "router_llm" : "round_robin";
+      const strat: "round_robin" | "router_llm" | "dag" | "supervisor_pipeline" =
+        s === "dag"
+          ? "dag"
+          : s === "router_llm"
+            ? "router_llm"
+            : s === "supervisor_pipeline"
+              ? "supervisor_pipeline"
+              : "round_robin";
       const dagOk =
         strat === "dag" &&
         r.dagSpec &&
@@ -607,9 +665,15 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
       setCreateDagJson(JSON.stringify(spec, null, 2));
       setDagJsonResetKey((k) => k + 1);
       setDagEditorMode("visual");
-      setCreateParticipants(
-        r.participants?.length ? r.participants : ["main"]
-      );
+      const pipe =
+        strat === "supervisor_pipeline" &&
+        r.supervisorPipeline &&
+        r.supervisorPipeline.length > 0
+          ? r.supervisorPipeline
+          : r.participants?.length
+            ? r.participants
+            : ["main"];
+      setCreateParticipants(pipe);
       const p1 = r.routerLlm;
       setRouterProvider(typeof p1?.provider === "string" ? p1.provider : "");
       setRouterModel(typeof p1?.model === "string" ? p1.model : "");
@@ -622,6 +686,33 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
       setRouterApiKeyConfigured(Boolean(r.routerApiKeyConfigured));
       setRouterThinking(
         typeof p1?.thinking_level === "string" ? p1.thinking_level : ""
+      );
+      const ps = r.supervisorLlm;
+      setSupervisorProvider(typeof ps?.provider === "string" ? ps.provider : "");
+      setSupervisorModel(typeof ps?.model === "string" ? ps.model : "");
+      setSupervisorBaseUrl(
+        typeof ps?.base_url === "string" && ps.base_url.trim()
+          ? ps.base_url
+          : "http://127.0.0.1:8000/v1"
+      );
+      setSupervisorApiKey("");
+      setSupervisorApiKeyConfigured(Boolean(r.supervisorApiKeyConfigured));
+      setSupervisorThinking(
+        typeof ps?.thinking_level === "string" ? ps.thinking_level : ""
+      );
+      setCreateSupervisorMaxIter(
+        String(
+          typeof r.supervisorMaxIterations === "number" && r.supervisorMaxIterations > 0
+            ? r.supervisorMaxIterations
+            : 5
+        )
+      );
+      setCreateSupervisorLlmMaxRetries(
+        String(
+          typeof r.supervisorLlmMaxRetries === "number" && r.supervisorLlmMaxRetries >= 0
+            ? r.supervisorLlmMaxRetries
+            : 12
+        )
       );
       setOrchFormOpen(true);
     },
@@ -686,6 +777,18 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
             thinking_level: routerThinking || undefined,
           }
         : undefined;
+    const supervisorPayload =
+      createStrategy === "supervisor_pipeline"
+        ? {
+            provider: supervisorProvider || undefined,
+            model: supervisorModel || undefined,
+            base_url: supervisorBaseUrl || undefined,
+            api_key: supervisorApiKey.trim() || undefined,
+            thinking_level: supervisorThinking || undefined,
+          }
+        : undefined;
+    const supMax = Number(createSupervisorMaxIter || "5");
+    const supLlmRetries = Number(createSupervisorLlmMaxRetries ?? "12");
     const sessionKey =
       orchFormMode === "edit" ? orchEditSessionKey.trim() || "desktop-orchestrator" : "desktop-orchestrator";
 
@@ -701,6 +804,19 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
         strategy: createStrategy,
         dag: dagSpec,
         routerLlm: routerPayload,
+        supervisorPipeline:
+          createStrategy === "supervisor_pipeline" ? [...createParticipants] : undefined,
+        supervisorLlm: supervisorPayload,
+        supervisorMaxIterations:
+          createStrategy === "supervisor_pipeline" && Number.isFinite(supMax) && supMax > 0
+            ? Math.min(64, supMax)
+            : undefined,
+        supervisorLlmMaxRetries:
+          createStrategy === "supervisor_pipeline" &&
+          Number.isFinite(supLlmRetries) &&
+          supLlmRetries >= 0
+            ? Math.min(64, Math.floor(supLlmRetries))
+            : undefined,
         idempotencyKey: idem,
       });
       if (!res.ok) {
@@ -720,6 +836,19 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
       strategy: createStrategy,
       dag: dagSpec,
       routerLlm: routerPayload,
+      supervisorPipeline:
+        createStrategy === "supervisor_pipeline" ? [...createParticipants] : undefined,
+      supervisorLlm: supervisorPayload,
+      supervisorMaxIterations:
+        createStrategy === "supervisor_pipeline" && Number.isFinite(supMax) && supMax > 0
+          ? Math.min(64, supMax)
+          : undefined,
+      supervisorLlmMaxRetries:
+        createStrategy === "supervisor_pipeline" &&
+        Number.isFinite(supLlmRetries) &&
+        supLlmRetries >= 0
+          ? Math.min(64, Math.floor(supLlmRetries))
+          : undefined,
       idempotencyKey: idem,
     });
     if (!res.ok) {
@@ -744,6 +873,13 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     routerModel,
     routerProvider,
     routerThinking,
+    createSupervisorMaxIter,
+    createSupervisorLlmMaxRetries,
+    supervisorApiKey,
+    supervisorBaseUrl,
+    supervisorModel,
+    supervisorProvider,
+    supervisorThinking,
     t,
   ]);
 
@@ -868,7 +1004,13 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
           {selected?.status ? (
             <div className="text-[10px] text-[var(--muted)]">
               {t("orchestrateStatus")}: {selected.status}
-              {selected.strategy === "dag" ? ` · ${t("orchestrateStrategyDag")}` : ""}
+              {selected.strategy === "dag"
+                ? ` · ${t("orchestrateStrategyDag")}`
+                : selected.strategy === "supervisor_pipeline"
+                  ? ` · ${t("orchestrateStrategySupervisor")}`
+                  : selected.strategy === "router_llm"
+                    ? ` · ${t("orchestrateStrategyRouter")}`
+                    : ""}
             </div>
           ) : null}
           {selected?.strategy === "dag" && selected.dagProgress ? (
@@ -1043,7 +1185,9 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
               placeholder={t("orchestratePrompt")}
               participants={selected?.participants ?? []}
               hintBelow={
-                selected?.strategy !== "dag" ? t("orchestrateMentionHint") : null
+                selected?.strategy !== "dag" && selected?.strategy !== "supervisor_pipeline"
+                  ? t("orchestrateMentionHint")
+                  : null
               }
               noMatchLabel={t("orchestrateMentionNoMatch")}
             />
@@ -1107,7 +1251,30 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
                 />
               </label>
 
-              {createStrategy !== "dag" ? (
+              {createStrategy === "dag" ? (
+                <p className="text-[10px] text-[var(--muted)]">{t("orchestrateDagNote")}</p>
+              ) : createStrategy === "supervisor_pipeline" ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[var(--muted)] text-xs">{t("orchestrateSupervisorMaxIter")}</span>
+                    <input
+                      className="px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-[var(--text)] text-xs"
+                      value={createSupervisorMaxIter}
+                      onChange={(e) => setCreateSupervisorMaxIter(e.target.value)}
+                      inputMode="numeric"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[var(--muted)] text-xs">{t("orchestrateSupervisorLlmMaxRetries")}</span>
+                    <input
+                      className="px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-[var(--text)] text-xs"
+                      value={createSupervisorLlmMaxRetries}
+                      onChange={(e) => setCreateSupervisorLlmMaxRetries(e.target.value)}
+                      inputMode="numeric"
+                    />
+                  </label>
+                </div>
+              ) : (
                 <label className="flex flex-col gap-1">
                   <span className="text-[var(--muted)] text-xs">{t("orchestrateMaxRounds")}</span>
                   <input
@@ -1117,8 +1284,6 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
                     inputMode="numeric"
                   />
                 </label>
-              ) : (
-                <p className="text-[10px] text-[var(--muted)]">{t("orchestrateDagNote")}</p>
               )}
 
               <label className="flex flex-col gap-1">
@@ -1127,12 +1292,19 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
                   className="px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-[var(--text)] text-xs"
                   value={createStrategy}
                   onChange={(e) =>
-                    setCreateStrategy(e.target.value as "round_robin" | "router_llm" | "dag")
+                    setCreateStrategy(
+                      e.target.value as
+                        | "round_robin"
+                        | "router_llm"
+                        | "dag"
+                        | "supervisor_pipeline"
+                    )
                   }
                 >
                   <option value="round_robin">{t("orchestrateStrategyRoundRobin")}</option>
                   <option value="router_llm">{t("orchestrateStrategyRouter")}</option>
                   <option value="dag">{t("orchestrateStrategyDag")}</option>
+                  <option value="supervisor_pipeline">{t("orchestrateStrategySupervisor")}</option>
                 </select>
               </label>
 
@@ -1185,6 +1357,9 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
                 </div>
               ) : (
                 <div className="space-y-2">
+                  {createStrategy === "supervisor_pipeline" ? (
+                    <p className="text-[10px] text-[var(--muted)]">{t("orchestrateSupervisorParticipantsHint")}</p>
+                  ) : null}
                   <div className="flex items-center justify-between">
                     <span className="text-[var(--muted)] text-xs">{t("orchestrateParticipants")}</span>
                     <button
@@ -1282,6 +1457,100 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
                       placeholder="off | low | medium | high"
                     />
                   </label>
+                </div>
+              ) : null}
+
+              {createStrategy === "supervisor_pipeline" ? (
+                <div className="border-t border-[var(--border)] pt-3 space-y-3">
+                  <div className="text-[10px] text-[var(--muted)]">{t("orchestrateSupervisorHint")}</div>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[var(--muted)] text-xs">{t("agentsCreateLlmProvider")}</span>
+                    <select
+                      className="px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-[var(--text)] text-xs"
+                      value={supervisorProvider}
+                      onChange={(e) => setSupervisorProvider(e.target.value)}
+                    >
+                      <option value="">openai</option>
+                      {providers.map((p) => (
+                        <option key={p} value={p}>
+                          {p}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[var(--muted)] text-xs">{t("agentsCreateLlmModel")}</span>
+                    <input
+                      className="px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-[var(--text)] text-xs"
+                      value={supervisorModel}
+                      onChange={(e) => setSupervisorModel(e.target.value)}
+                      placeholder="gpt-4o-mini"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[var(--muted)] text-xs">{t("agentsCreateLlmBaseUrl")}</span>
+                    <input
+                      className="px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-[var(--text)] text-xs"
+                      value={supervisorBaseUrl}
+                      onChange={(e) => setSupervisorBaseUrl(e.target.value)}
+                      placeholder="http://127.0.0.1:8000/v1"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[var(--muted)] text-xs">{t("agentsCreateLlmApiKey")}</span>
+                    <input
+                      type="password"
+                      className="px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-[var(--text)] text-xs"
+                      value={supervisorApiKey}
+                      onChange={(e) => setSupervisorApiKey(e.target.value)}
+                      autoComplete="off"
+                      placeholder={
+                        supervisorApiKeyConfigured ? t("agentsEditLlmApiKeyPlaceholder") : undefined
+                      }
+                    />
+                    {supervisorApiKeyConfigured ? (
+                      <span className="text-[10px] text-[var(--muted)]">
+                        {t("agentsEditLlmApiKeyHint")}
+                      </span>
+                    ) : null}
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[var(--muted)] text-xs">{t("agentsCreateLlmThinking")}</span>
+                    <input
+                      className="px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-[var(--text)] text-xs"
+                      value={supervisorThinking}
+                      onChange={(e) => setSupervisorThinking(e.target.value)}
+                      placeholder="off | low | medium | high"
+                    />
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      title={t("agentsLlmTestTooltip")}
+                      aria-label={t("agentsLlmTestTooltip")}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--border)] bg-[var(--panel)] text-xs hover:opacity-90 disabled:opacity-50"
+                      disabled={supervisorLlmTestLoading}
+                      onClick={() => void runSupervisorLlmTest()}
+                    >
+                      <Image
+                        src="/icons/test.png"
+                        alt=""
+                        width={16}
+                        height={16}
+                        className="h-4 w-4 object-contain"
+                      />
+                      {t("agentsLlmTest")}
+                    </button>
+                    {supervisorLlmTestBanner ? (
+                      <span
+                        className={`text-[11px] ${
+                          supervisorLlmTestBanner.ok ? "text-emerald-500/90" : "text-red-500/90"
+                        }`}
+                      >
+                        {supervisorLlmTestBanner.text}
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
               ) : null}
 

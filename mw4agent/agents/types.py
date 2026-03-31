@@ -67,6 +67,8 @@ class AgentRunParams:
     timeout_seconds: Optional[int] = None
     extra_system_prompt: Optional[str] = None
     deliver: bool = False
+    # When true, apply an extra sandbox tool policy layer for this run.
+    sandbox: Optional[bool] = None
     # High-level channel / source (feishu | telegram | webhook | console | internal ...)
     channel: Optional[str] = None
     # Caller identity & gating (used for tool permissions)

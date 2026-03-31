@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..agents.types import AgentRunParams
 from ..config import get_default_config_manager
 from mw4agent.log import get_logger
+from mw4agent.log.agent_llm import format_agent_tag, preview_one_line
+
 logger = get_logger(__name__)
 
 # One tool call from API: id, name, arguments (JSON string or dict)
@@ -295,8 +297,10 @@ def _call_openai_chat(
     base_url: str,
     extra_body: Optional[Dict[str, Any]] = None,
     timeout_s: float = 30.0,
+    agent_id: Optional[str] = None,
 ) -> Tuple[str, LLMUsage]:
     """Call an OpenAI-compatible Chat Completions API (minimal subset)."""
+    tag = format_agent_tag(agent_id)
     base = base_url.rstrip("/")
     # Avoid double /v1 when user sets base_url to https://api.example.com/v1
     if base.endswith("/v1"):
@@ -317,6 +321,13 @@ def _call_openai_chat(
     if isinstance(extra_body, dict) and extra_body:
         body.update(extra_body)
     data = json.dumps(body).encode("utf-8")
+    logger.info(
+        "%s llm chat_completions request model=%s messages=%d url=%s",
+        tag,
+        model,
+        len(resolved_messages),
+        url,
+    )
     req = urllib.request.Request(url=url, data=data, method="POST", headers=headers)
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         raw = resp.read().decode("utf-8")
@@ -330,6 +341,14 @@ def _call_openai_chat(
         input_tokens=usage_obj.get("prompt_tokens"),
         output_tokens=usage_obj.get("completion_tokens"),
         total_tokens=usage_obj.get("total_tokens"),
+    )
+    logger.info(
+        "%s llm chat_completions done prompt_tokens=%s completion_tokens=%s total_tokens=%s preview=%s",
+        tag,
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.total_tokens,
+        preview_one_line(text or ""),
     )
     return text or "", usage
 
@@ -363,10 +382,12 @@ def _call_openai_chat_with_tools(
     base_url: str,
     extra_body: Optional[Dict[str, Any]] = None,
     timeout_s: float = 60.0,
+    agent_id: Optional[str] = None,
 ) -> Tuple[Optional[str], List[ToolCallPayload], LLMUsage]:
     """Call OpenAI Chat Completions with tools. Returns (content, tool_calls, usage).
     tool_calls items are {id, name, arguments} with arguments already parsed to dict.
     """
+    tag = format_agent_tag(agent_id)
     base = base_url.rstrip("/")
     if base.endswith("/v1"):
         url = f"{base}/chat/completions"
@@ -385,12 +406,19 @@ def _call_openai_chat_with_tools(
     if isinstance(extra_body, dict) and extra_body:
         body.update(extra_body)
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    logger.debug(f'llm request {url}')
+    logger.info(
+        "%s llm chat_completions+tools request model=%s messages=%d tools=%d url=%s",
+        tag,
+        model,
+        len(messages),
+        len(tools),
+        url,
+    )
     req = urllib.request.Request(url=url, data=data, method="POST", headers=headers)
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         raw = resp.read().decode("utf-8")
     obj = json.loads(raw)
-    logger.debug(f'llm response {obj}')
+    logger.debug("llm raw response keys=%s", list(obj.keys()) if isinstance(obj, dict) else type(obj))
     choice = obj.get("choices", [{}])[0] or {}
     msg = choice.get("message") or {}
     content, reasoning = _extract_text_and_reasoning_from_message(msg, choice=choice)
@@ -417,7 +445,8 @@ def _call_openai_chat_with_tools(
         tool_calls.append({"id": tid, "name": name, "arguments": args})
     if tool_calls:
         logger.info(
-            "llm returned %d tool_calls: %s",
+            "%s llm tool_calls n=%d names=%s",
+            tag,
             len(tool_calls),
             [t.get("name") for t in tool_calls],
         )
@@ -427,6 +456,21 @@ def _call_openai_chat_with_tools(
         output_tokens=usage_obj.get("completion_tokens"),
         total_tokens=usage_obj.get("total_tokens"),
     )
+    if content and not tool_calls:
+        logger.info(
+            "%s llm chat_completions+tools done (text) prompt_tokens=%s completion_tokens=%s preview=%s",
+            tag,
+            usage.input_tokens,
+            usage.output_tokens,
+            preview_one_line(content),
+        )
+    elif tool_calls:
+        logger.info(
+            "%s llm chat_completions+tools done (tools) prompt_tokens=%s completion_tokens=%s",
+            tag,
+            usage.input_tokens,
+            usage.output_tokens,
+        )
     return (content, tool_calls, usage)
 
 
@@ -469,6 +513,7 @@ def generate_reply_with_tools(
             api_key=api_key or "none",
             base_url=base_url,
             extra_body=_thinking_extra_body(provider, thinking_level),
+            agent_id=params.agent_id,
         )
         return reply, [], provider, model or spec.default_model, usage
 
@@ -480,6 +525,7 @@ def generate_reply_with_tools(
             api_key=api_key or "none",
             base_url=base_url,
             extra_body=_thinking_extra_body(provider, thinking_level),
+            agent_id=params.agent_id,
         )
         return content, tool_calls, provider, model or spec.default_model, usage
     except Exception as e:
@@ -535,6 +581,7 @@ def generate_reply(params: AgentRunParams, *, messages: Optional[List[Dict[str, 
             api_key=api_key or "none",
             base_url=base_url,
             extra_body=_thinking_extra_body(provider, thinking_level),
+            agent_id=params.agent_id,
         )
         return text or "", provider, model or spec.default_model, usage
     except Exception as e:
@@ -608,6 +655,7 @@ def test_llm_connection(llm: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             base_url=safe_base,
             extra_body=_thinking_extra_body(provider, thinking_level),
             timeout_s=25.0,
+            agent_id="llm.test",
         )
         preview = (text or "").strip()[:400]
         return {"success": True, "message": "Request succeeded.", "preview": preview or None}

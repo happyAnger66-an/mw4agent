@@ -71,6 +71,14 @@ const en: Record<string, string> = {
   orchestrateStrategyRoundRobin: "Round-robin",
   orchestrateStrategyRouter: "Router LLM",
   orchestrateStrategyDag: "DAG",
+  orchestrateStrategySupervisor: "Supervisor pipeline",
+  orchestrateSupervisorMaxIter: "Max macro-iterations (per message)",
+  orchestrateSupervisorParticipantsHint:
+    "List order is the run order A→B→C; remove and re-add to change order.",
+  orchestrateSupervisorHint:
+    "After each full pipeline pass, the supervisor LLM chooses continue (another pass) or stop.",
+  orchestrateSupervisorLlmMaxRetries:
+    "Supervisor LLM max retries (10s apart after failure or empty response)",
   orchestrateDagJson: "DAG spec (JSON)",
   orchestrateDagJsonHint:
     "nodes: [{ id, agentId, dependsOn?, title?, position?:{x,y} }]. Optional parallelism (1–32). The visual editor stays in sync when valid.",
@@ -221,6 +229,11 @@ const zhCN: Record<string, string> = {
   orchestrateStrategyRoundRobin: "轮询",
   orchestrateStrategyRouter: "路由 LLM",
   orchestrateStrategyDag: "DAG",
+  orchestrateStrategySupervisor: "监督流水线",
+  orchestrateSupervisorMaxIter: "最大宏迭代次数（每条消息）",
+  orchestrateSupervisorParticipantsHint: "列表顺序即执行顺序 A→B→C；可删除后重新添加以调整顺序。",
+  orchestrateSupervisorHint: "每一轮完整流水线结束后，由监督 LLM 决定继续再来一轮或结束。",
+  orchestrateSupervisorLlmMaxRetries: "监督 LLM 最大重试次数（失败或空响应后间隔 10 秒）",
   orchestrateDagJson: "DAG 定义（JSON）",
   orchestrateDagJsonHint:
     "nodes: [{ id, agentId, dependsOn?, title?, position?:{x,y} }]，可选 parallelism（1–32）。JSON 合法时会与画布同步。",
