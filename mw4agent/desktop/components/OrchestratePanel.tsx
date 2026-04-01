@@ -213,6 +213,8 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
   const [routerApiKey, setRouterApiKey] = useState("");
   const [routerApiKeyConfigured, setRouterApiKeyConfigured] = useState(false);
   const [routerThinking, setRouterThinking] = useState("");
+  /** Per-participant role text for router_llm (synced with createParticipants). */
+  const [routerAgentRoles, setRouterAgentRoles] = useState<Record<string, string>>({});
   const [supervisorProvider, setSupervisorProvider] = useState("");
   const [supervisorModel, setSupervisorModel] = useState("");
   const [supervisorBaseUrl, setSupervisorBaseUrl] = useState("");
@@ -584,6 +586,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     setDagJsonResetKey(0);
     setDagEditorMode("visual");
     setCreateParticipants(["main"]);
+    setRouterAgentRoles({});
     setRouterProvider("");
     setRouterModel("");
     setRouterBaseUrl("http://127.0.0.1:8000/v1");
@@ -604,6 +607,17 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     setSupervisorLlmTestLoading(false);
     setOrchFormOpen(true);
   }, []);
+
+  useEffect(() => {
+    if (createStrategy !== "router_llm") return;
+    setRouterAgentRoles((prev) => {
+      const next: Record<string, string> = {};
+      for (const p of createParticipants) {
+        next[p] = prev[p] ?? "";
+      }
+      return next;
+    });
+  }, [createParticipants, createStrategy]);
 
   const runRouterLlmTest = useCallback(async () => {
     setRouterLlmTestLoading(true);
@@ -724,6 +738,16 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
       setRouterThinking(
         typeof p1?.thinking_level === "string" ? p1.thinking_level : ""
       );
+      const ra = strat === "router_llm" ? r.routerAgentRoles : undefined;
+      if (strat === "router_llm") {
+        const m: Record<string, string> = {};
+        for (const pid of pipe) {
+          m[pid] = ra && typeof ra[pid] === "string" ? ra[pid] : "";
+        }
+        setRouterAgentRoles(m);
+      } else {
+        setRouterAgentRoles({});
+      }
       const ps = r.supervisorLlm;
       setSupervisorProvider(typeof ps?.provider === "string" ? ps.provider : "");
       setSupervisorModel(typeof ps?.model === "string" ? ps.model : "");
@@ -814,6 +838,12 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
             thinking_level: routerThinking || undefined,
           }
         : undefined;
+    const routerAgentRolesPayload =
+      createStrategy === "router_llm"
+        ? Object.fromEntries(
+            createParticipants.map((p) => [p, (routerAgentRoles[p] ?? "").trim()])
+          )
+        : undefined;
     const supervisorPayload =
       createStrategy === "supervisor_pipeline"
         ? {
@@ -841,6 +871,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
         strategy: createStrategy,
         dag: dagSpec,
         routerLlm: routerPayload,
+        routerAgentRoles: routerAgentRolesPayload,
         supervisorPipeline:
           createStrategy === "supervisor_pipeline" ? [...createParticipants] : undefined,
         supervisorLlm: supervisorPayload,
@@ -873,6 +904,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
       strategy: createStrategy,
       dag: dagSpec,
       routerLlm: routerPayload,
+      routerAgentRoles: routerAgentRolesPayload,
       supervisorPipeline:
         createStrategy === "supervisor_pipeline" ? [...createParticipants] : undefined,
       supervisorLlm: supervisorPayload,
@@ -905,6 +937,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     orchEditSessionKey,
     orchFormEditId,
     orchFormMode,
+    routerAgentRoles,
     routerApiKey,
     routerBaseUrl,
     routerModel,
@@ -1581,6 +1614,24 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
                       placeholder="off | low | medium | high"
                     />
                   </label>
+                  <div className="rounded-lg border border-[var(--border)] bg-[var(--bg)] p-2 space-y-2">
+                    <div className="text-xs text-[var(--text)]">{t("orchestrateRouterAgentRoles")}</div>
+                    <p className="text-[10px] text-[var(--muted)]">{t("orchestrateRouterAgentRolesHint")}</p>
+                    {createParticipants.map((pid) => (
+                      <label key={pid} className="flex flex-col gap-1">
+                        <span className="text-[10px] text-[var(--muted)] font-mono">{pid}</span>
+                        <textarea
+                          className="min-h-[52px] px-2 py-1.5 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-[var(--text)] text-[11px] resize-y"
+                          value={routerAgentRoles[pid] ?? ""}
+                          onChange={(e) =>
+                            setRouterAgentRoles((prev) => ({ ...prev, [pid]: e.target.value }))
+                          }
+                          placeholder={t("orchestrateRouterAgentRolePlaceholder")}
+                          spellCheck={false}
+                        />
+                      </label>
+                    ))}
+                  </div>
                   <div className="flex flex-wrap items-center gap-2 pt-1">
                     <button
                       type="button"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -19,6 +20,22 @@ from ..llm.backends import _call_openai_chat, _thinking_extra_body, list_provide
 from ..memory.bootstrap import load_bootstrap_for_orchestration
 
 from .dag_spec import MAX_UPSTREAM_SNIPPET, normalize_dag_dict
+
+logger = logging.getLogger(__name__)
+
+# Router LLM: transcript / snippets (characters) for routing prompt and agent message context.
+_ROUTER_LLM_TRANSCRIPT_MAX_CHARS = 12000
+_ROUTER_LLM_ORIGINAL_USER_MAX_CHARS = 4000
+_ROUTER_LLM_IMMEDIATE_MAX_CHARS = 8000
+# Per-agent role line for router prompt (identity / responsibilities).
+_ROUTER_AGENT_ROLE_MAX_CHARS = 2000
+
+# Appended to every orchestration ``orch_hint``: match user language for reasoning (if shown) and replies.
+_ORCH_LANGUAGE_HINT_EN_ZH = (
+    "Language: Use the same language as the user for reasoning (if shown) and for the final reply "
+    "(e.g. Chinese when the user writes in Chinese).\n"
+    "语言：与用户保持一致——若展示推理过程，与最终回复均使用用户所用语言（例如用户使用中文则用中文）。\n"
+)
 
 # Supervisor LLM: delay between retries after connection/transport/empty response failures.
 _SUPERVISOR_LLM_RETRY_DELAY_S = 10.0
@@ -79,6 +96,8 @@ class OrchState:
     strategy: str = "round_robin"  # round_robin|router_llm|dag|supervisor_pipeline
     maxRounds: int = 8  # round_robin: assistant turns per user message; dag: largely ignored (one run per node)
     routerLlm: Optional[Dict[str, str]] = None
+    # strategy=router_llm: agentId -> user-provided role / identity (injected into router prompt each pick)
+    routerAgentRoles: Optional[Dict[str, str]] = None
     participants: List[str] = field(default_factory=list)
     agentSessions: Dict[str, str] = field(default_factory=dict)  # agentId -> sessionId
     currentRound: int = 0
@@ -109,6 +128,191 @@ def _truncate_text(s: str, max_len: int) -> str:
     if len(t) <= max_len:
         return t
     return t[: max(0, max_len - 1)] + "…"
+
+
+def _strip_optional_markdown_fence(s: str) -> str:
+    """Remove optional ``` fences (same idea as supervisor JSON parsing)."""
+    t = (s or "").strip()
+    if not t.startswith("```"):
+        return t
+    lines = t.split("\n")
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _extract_first_json_object(s: str) -> Optional[str]:
+    """Return first balanced `{...}` substring, or None."""
+    i = (s or "").find("{")
+    if i < 0:
+        return None
+    depth = 0
+    for j in range(i, len(s)):
+        if s[j] == "{":
+            depth += 1
+        elif s[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return s[i : j + 1]
+    return None
+
+
+def _last_user_message_text(messages: List[OrchMessage]) -> str:
+    for m in reversed(messages or []):
+        if m.role == "user":
+            return (m.text or "").strip()
+    return ""
+
+
+def _format_transcript_since_last_user(messages: List[OrchMessage], max_chars: int) -> str:
+    """Transcript from the last user message through the latest message (for router context)."""
+    msgs = messages or []
+    last_u = -1
+    for i, m in enumerate(msgs):
+        if m.role == "user":
+            last_u = i
+    if last_u < 0:
+        return ""
+    parts: List[str] = []
+    for m in msgs[last_u:]:
+        who = (m.speaker or "").strip() or ("user" if m.role == "user" else "assistant")
+        label = "user" if m.role == "user" else who
+        text = (m.text or "").strip()
+        if not text:
+            continue
+        parts.append(f"[{label}]\n{text}")
+    blob = "\n\n".join(parts)
+    return _truncate_text(blob, max_chars)
+
+
+def _parse_router_agent_pick(raw: str, participants: List[str]) -> Optional[str]:
+    """Parse router reply: JSON ``next_agent`` preferred, else first line as agent id."""
+    s = _strip_optional_markdown_fence(raw or "")
+    s = s.strip()
+    if not s:
+        return None
+    cand_set = set(participants)
+    for fragment in (s, _extract_first_json_object(s) or ""):
+        if not fragment:
+            continue
+        try:
+            obj = json.loads(fragment)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        for key in ("next_agent", "agent_id", "agent", "speaker"):
+            v = obj.get(key)
+            if isinstance(v, str) and v.strip() in cand_set:
+                return v.strip()
+    line = s.splitlines()[0].strip().strip("`").strip('"').strip("'")
+    if line in cand_set:
+        return line
+    return None
+
+
+def _format_router_agent_roles_block(
+    participants: List[str], roles: Optional[Dict[str, str]]
+) -> str:
+    """Human-readable block listing each candidate id and optional role description."""
+    if not participants:
+        return "(no candidates)"
+    lines: List[str] = []
+    r = roles or {}
+    for pid in participants:
+        desc = (r.get(pid) or "").strip()
+        if desc:
+            lines.append(f"- {pid}: {desc}")
+        else:
+            lines.append(f"- {pid}: (no role description)")
+    return "\n".join(lines)
+
+
+def _canon_participant_id(agent_id: str, participants: List[str]) -> Optional[str]:
+    """Return the id string as it appears in ``participants``, or None if not a member."""
+    want = normalize_agent_id(agent_id)
+    for p in participants:
+        if normalize_agent_id(p) == want:
+            return p
+    return None
+
+
+def _filter_router_agent_roles_to_participants(
+    old: Optional[Dict[str, str]], participants: List[str]
+) -> Optional[Dict[str, str]]:
+    if not old or not participants:
+        return None
+    out: Dict[str, str] = {}
+    for k, v in old.items():
+        canon = _canon_participant_id(str(k), participants)
+        if canon is not None and (v or "").strip():
+            out[canon] = _truncate_text(str(v).strip(), _ROUTER_AGENT_ROLE_MAX_CHARS)
+    return out or None
+
+
+def _patch_router_agent_roles(
+    old: Optional[Dict[str, str]],
+    patch: Optional[Dict[str, Any]],
+    participants: List[str],
+) -> Optional[Dict[str, str]]:
+    """Merge per-agent role descriptions; ``patch`` None means keep ``old`` (filtered)."""
+    if patch is None:
+        return _filter_router_agent_roles_to_participants(old, participants)
+    if not isinstance(patch, dict):
+        return _filter_router_agent_roles_to_participants(old, participants)
+    base: Dict[str, str] = {}
+    if isinstance(old, dict):
+        for k, v in old.items():
+            canon = _canon_participant_id(str(k), participants)
+            if canon is not None and v is not None and str(v).strip():
+                base[canon] = _truncate_text(str(v).strip(), _ROUTER_AGENT_ROLE_MAX_CHARS)
+    for k, v in patch.items():
+        canon = _canon_participant_id(str(k), participants)
+        if canon is None:
+            continue
+        if v is None:
+            base.pop(canon, None)
+            continue
+        s = str(v).strip()
+        if not s:
+            base.pop(canon, None)
+        else:
+            base[canon] = _truncate_text(s, _ROUTER_AGENT_ROLE_MAX_CHARS)
+    return base or None
+
+
+def _build_router_llm_user_prompt(
+    *,
+    participants: List[str],
+    original_user: str,
+    transcript: str,
+    last_immediate: str,
+    turn_1based: int,
+    max_turns: int,
+    agent_roles: Optional[Dict[str, str]] = None,
+) -> str:
+    agent_list = ", ".join(participants)
+    ou = _truncate_text(original_user, _ROUTER_LLM_ORIGINAL_USER_MAX_CHARS)
+    tr = (transcript or "").strip() or "(empty)"
+    li = _truncate_text(last_immediate, _ROUTER_LLM_IMMEDIATE_MAX_CHARS)
+    roles_block = _format_router_agent_roles_block(participants, agent_roles)
+    return (
+        "You are the routing model for a multi-agent team. "
+        "Choose exactly ONE next speaker from the candidates.\n\n"
+        f"Candidates (pick exactly one id verbatim): {agent_list}\n\n"
+        "Agent identity / responsibilities (use these to match expertise to the user request "
+        "and the immediate next step):\n"
+        f"{roles_block}\n\n"
+        f"Assistant turn in this user-message batch: {turn_1based} of {max_turns}\n\n"
+        f"Original user request:\n{ou}\n\n"
+        f"Orchestration transcript since that user message:\n{tr}\n\n"
+        f"Immediate context for the next step (primary input for the chosen agent):\n{li}\n\n"
+        "Reply with ONLY valid JSON, no markdown fences, a single object:\n"
+        '{"next_agent":"<candidate_id>"}\n'
+        "The next_agent value must be exactly one of the candidate ids."
+    )
 
 
 def _parse_supervisor_decision(raw: str) -> Dict[str, Any]:
@@ -302,6 +506,16 @@ class Orchestrator:
             s_iter = 0
         s_last = data.get("supervisorLastDecision") or data.get("supervisor_last_decision")
         s_decision: Optional[Dict[str, Any]] = dict(s_last) if isinstance(s_last, dict) else None
+        rar_raw = data.get("routerAgentRoles") or data.get("router_agent_roles")
+        router_agent_roles_loaded: Optional[Dict[str, str]] = None
+        if isinstance(rar_raw, dict) and rar_raw:
+            router_agent_roles_loaded = {
+                str(k): str(v) for k, v in rar_raw.items() if v is not None and str(v).strip()
+            }
+        parts_load = [str(x) for x in (data.get("participants") or []) if str(x).strip()]
+        rar_filtered = _filter_router_agent_roles_to_participants(
+            router_agent_roles_loaded, parts_load
+        )
         return OrchState(
             orchId=str(data.get("orchId") or orch_id),
             sessionKey=str(data.get("sessionKey") or ""),
@@ -312,7 +526,8 @@ class Orchestrator:
             strategy=str(data.get("strategy") or "round_robin"),
             maxRounds=int(data.get("maxRounds") or 8) or 8,
             routerLlm=dict(data.get("routerLlm") or {}) or None,
-            participants=[str(x) for x in (data.get("participants") or []) if str(x).strip()],
+            routerAgentRoles=rar_filtered,
+            participants=parts_load,
             agentSessions=dict(data.get("agentSessions") or {}),
             currentRound=int(data.get("currentRound") or 0) or 0,
             messages=msgs,
@@ -380,6 +595,7 @@ class Orchestrator:
         max_rounds: int = 8,
         strategy: str = "round_robin",
         router_llm: Optional[Dict[str, str]] = None,
+        router_agent_roles: Optional[Dict[str, Any]] = None,
         dag: Optional[Dict[str, Any]] = None,
         supervisor_pipeline: Optional[List[str]] = None,
         supervisor_llm: Optional[Dict[str, str]] = None,
@@ -445,6 +661,10 @@ class Orchestrator:
                 agent_sess = {p: str(uuid.uuid4()) for p in parts}
                 router_final = dict(router_llm) if isinstance(router_llm, dict) and router_llm else None
 
+        roles_stored: Optional[Dict[str, str]] = None
+        if dag is None and strat.lower() == "router_llm":
+            roles_stored = _patch_router_agent_roles(None, router_agent_roles, parts)
+
         now = _now_ms()
         st = OrchState(
             orchId=orch_id,
@@ -456,6 +676,7 @@ class Orchestrator:
             strategy=strat,
             maxRounds=max(1, int(max_rounds or 8)),
             routerLlm=router_final,
+            routerAgentRoles=roles_stored,
             participants=parts,
             agentSessions=agent_sess,
             currentRound=0,
@@ -492,6 +713,7 @@ class Orchestrator:
         max_rounds: int = 8,
         strategy: str = "round_robin",
         router_llm: Optional[Dict[str, str]] = None,
+        router_agent_roles: Optional[Dict[str, Any]] = None,
         dag: Optional[Dict[str, Any]] = None,
         supervisor_pipeline: Optional[List[str]] = None,
         supervisor_llm: Optional[Dict[str, str]] = None,
@@ -538,6 +760,7 @@ class Orchestrator:
             old_as = dict(st.agentSessions or {})
             agent_sess = {p: old_as.get(p) or str(uuid.uuid4()) for p in parts}
             router_llm_out = None
+            st.routerAgentRoles = None
             st.supervisorPipeline = []
             st.supervisorLlm = None
             st.supervisorMaxIterations = 5
@@ -583,6 +806,7 @@ class Orchestrator:
                 st.supervisorLastDecision = None
                 router_llm_out = None
                 strat = "supervisor_pipeline"
+                st.routerAgentRoles = None
             else:
                 parts = [normalize_agent_id(x) for x in participants if str(x).strip()]
                 parts = [p for i, p in enumerate(parts) if p and p not in parts[:i]]
@@ -592,8 +816,12 @@ class Orchestrator:
                 agent_sess = {p: old_as.get(p) or str(uuid.uuid4()) for p in parts}
                 if strat == "router_llm":
                     router_llm_out = self._patch_router_llm(st.routerLlm, router_llm)
+                    st.routerAgentRoles = _patch_router_agent_roles(
+                        st.routerAgentRoles, router_agent_roles, parts
+                    )
                 else:
                     router_llm_out = None
+                    st.routerAgentRoles = None
                 st.supervisorPipeline = []
                 st.supervisorLlm = None
                 st.supervisorMaxIterations = 5
@@ -628,6 +856,7 @@ class Orchestrator:
         max_rounds: int = 8,
         strategy: str = "round_robin",
         router_llm: Optional[Dict[str, str]] = None,
+        router_agent_roles: Optional[Dict[str, Any]] = None,
         dag: Optional[Dict[str, Any]] = None,
     ) -> OrchState:
         # Back-compat: create + send
@@ -638,6 +867,7 @@ class Orchestrator:
             max_rounds=max_rounds,
             strategy=strategy,
             router_llm=router_llm,
+            router_agent_roles=router_agent_roles,
             dag=dag,
         )
         self.send(orch_id=st.orchId, message=message)
@@ -743,12 +973,20 @@ class Orchestrator:
                     elif (st.strategy or "").strip() == "router_llm" and st.routerLlm:
                         try:
                             router = st.routerLlm
-                            agent_list = ", ".join(st.participants)
-                            prompt = (
-                                "You are a router for a multi-agent team.\n"
-                                f"Candidates: [{agent_list}]\n"
-                                "Pick exactly ONE next speaker from candidates. Return ONLY the agent id.\n\n"
-                                f"Conversation last message:\n{last_text}\n"
+                            orig_u = _last_user_message_text(st.messages)
+                            tx = _format_transcript_since_last_user(
+                                st.messages, _ROUTER_LLM_TRANSCRIPT_MAX_CHARS
+                            )
+                            batch_turns = max(1, target_round - start_round)
+                            cur_turn = r - start_round + 1
+                            prompt = _build_router_llm_user_prompt(
+                                participants=st.participants,
+                                original_user=orig_u or last_text,
+                                transcript=tx,
+                                last_immediate=last_text,
+                                turn_1based=cur_turn,
+                                max_turns=batch_turns,
+                                agent_roles=getattr(st, "routerAgentRoles", None),
                             )
                             provider = (router.get("provider") or "").strip() or "openai"
                             model = (router.get("model") or "").strip() or "gpt-4o-mini"
@@ -768,21 +1006,34 @@ class Orchestrator:
                                 extra_body=_thinking_extra_body(provider, thinking_level),
                                 agent_id=f"{orch_id}:router",
                             )
-                            pick = (reply or "").strip().splitlines()[0].strip().strip("`").strip()
-                            if pick in st.participants:
+                            pick = _parse_router_agent_pick(reply or "", st.participants)
+                            if pick:
                                 agent_id = pick
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(
+                                "router_llm: speaker pick failed; using round-robin fallback: %s",
+                                e,
+                            )
                     session_id = st.agentSessions.get(agent_id) or str(uuid.uuid4())
                     st.agentSessions[agent_id] = session_id
 
                     cfg = self.agent_manager.get_or_create(agent_id)
                     workspace_dir = _orch_agent_workspace(orch_id, agent_id)
                     bootstrap = load_bootstrap_for_orchestration(cfg.workspace_dir, workspace_dir)
+                    is_router_llm = (st.strategy or "").strip() == "router_llm"
                     orch_hint = (
-                        "You are part of a multi-agent orchestration.\n"
-                        "Reply concisely, and include actionable outputs.\n"
-                    )
+                        (
+                            "You are part of a multi-agent orchestration (dynamic router).\n"
+                            "When your message includes [Original user request] and [Previous agent output], "
+                            "fulfill the user's goal while building on prior agents' work.\n"
+                            "Reply concisely, and include actionable outputs.\n"
+                        )
+                        if is_router_llm
+                        else (
+                            "You are part of a multi-agent orchestration.\n"
+                            "Reply concisely, and include actionable outputs.\n"
+                        )
+                    ) + _ORCH_LANGUAGE_HINT_EN_ZH
                     extra_system_prompt = f"{bootstrap}\n\n{orch_hint}".strip() if bootstrap else orch_hint
 
                     if r == start_round and st.messages and st.messages[-1].role == "user":
@@ -790,6 +1041,16 @@ class Orchestrator:
                         agent_message = _strip_at_mentions(raw_u)
                         if not agent_message.strip():
                             agent_message = raw_u
+                    elif is_router_llm and r > start_round:
+                        ou = _last_user_message_text(st.messages)
+                        if not (ou or "").strip():
+                            ou = last_text
+                        agent_message = (
+                            "[Original user request]\n"
+                            f"{ou}\n\n"
+                            "[Previous agent output]\n"
+                            f"{last_text}\n"
+                        ).strip()
                     else:
                         agent_message = last_text
 
@@ -976,7 +1237,7 @@ class Orchestrator:
                     orch_hint = (
                         "You are part of a multi-agent supervisor pipeline orchestration.\n"
                         "Reply concisely, and include actionable outputs.\n"
-                    )
+                    ) + _ORCH_LANGUAGE_HINT_EN_ZH
                     extra_system_prompt = f"{bootstrap}\n\n{orch_hint}".strip() if bootstrap else orch_hint
                     if agent_id == pipeline[0]:
                         agent_message = _strip_at_mentions(last_text)
@@ -1126,7 +1387,7 @@ class Orchestrator:
         orch_hint = (
             "You are part of a multi-agent DAG orchestration.\n"
             f"Current node id: {nid!r}. Reply concisely with actionable output.\n"
-        )
+        ) + _ORCH_LANGUAGE_HINT_EN_ZH
         extra_system_prompt = f"{bootstrap}\n\n{orch_hint}".strip() if bootstrap else orch_hint
 
         result = await self.runner.run(

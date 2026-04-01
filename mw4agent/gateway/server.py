@@ -1158,6 +1158,8 @@ def create_app(
             strategy = str(params.get("strategy") or "round_robin").strip() or "round_robin"
             router_llm_raw = params.get("routerLlm")
             router_llm = dict(router_llm_raw) if isinstance(router_llm_raw, dict) else None
+            rar_raw = params.get("routerAgentRoles") or params.get("router_agent_roles")
+            router_agent_roles = dict(rar_raw) if isinstance(rar_raw, dict) else None
             try:
                 max_rounds_int = int(max_rounds) if isinstance(max_rounds, (int, float, str)) and str(max_rounds).strip() else 8
             except Exception:
@@ -1202,6 +1204,7 @@ def create_app(
                     max_rounds=max_rounds_int,
                     strategy=strategy,
                     router_llm=router_llm,
+                    router_agent_roles=router_agent_roles,
                     dag=dag,
                     supervisor_pipeline=supervisor_pipeline,
                     supervisor_llm=supervisor_llm_dict,
@@ -1232,6 +1235,8 @@ def create_app(
             strategy = str(params.get("strategy") or "round_robin").strip() or "round_robin"
             router_llm_raw = params.get("routerLlm")
             router_llm = dict(router_llm_raw) if isinstance(router_llm_raw, dict) else None
+            rar_raw = params.get("routerAgentRoles") or params.get("router_agent_roles")
+            router_agent_roles = dict(rar_raw) if isinstance(rar_raw, dict) else None
             try:
                 max_rounds_int = int(max_rounds) if isinstance(max_rounds, (int, float, str)) and str(max_rounds).strip() else 8
             except Exception:
@@ -1274,6 +1279,7 @@ def create_app(
                     max_rounds=max_rounds_int,
                     strategy=strategy,
                     router_llm=router_llm,
+                    router_agent_roles=router_agent_roles,
                     dag=dag,
                     supervisor_pipeline=supervisor_pipeline,
                     supervisor_llm=supervisor_llm_dict,
@@ -1306,6 +1312,8 @@ def create_app(
             strategy = str(params.get("strategy") or "round_robin").strip() or "round_robin"
             router_llm_raw = params.get("routerLlm")
             router_llm = dict(router_llm_raw) if isinstance(router_llm_raw, dict) else None
+            rar_raw = params.get("routerAgentRoles") or params.get("router_agent_roles")
+            router_agent_roles = dict(rar_raw) if isinstance(rar_raw, dict) else None
             try:
                 max_rounds_int = int(max_rounds) if isinstance(max_rounds, (int, float, str)) and str(max_rounds).strip() else 8
             except Exception:
@@ -1349,6 +1357,7 @@ def create_app(
                     max_rounds=max_rounds_int,
                     strategy=strategy,
                     router_llm=router_llm,
+                    router_agent_roles=router_agent_roles,
                     dag=dag,
                     supervisor_pipeline=supervisor_pipeline,
                     supervisor_llm=supervisor_llm_dict,
@@ -1449,6 +1458,7 @@ def create_app(
                 "dagParallelism": getattr(st, "dagParallelism", 4),
                 "routerLlm": router_public,
                 "routerApiKeyConfigured": router_key_configured,
+                "routerAgentRoles": dict(getattr(st, "routerAgentRoles", None) or {}),
                 "supervisorPipeline": list(getattr(st, "supervisorPipeline", None) or []),
                 "supervisorMaxIterations": int(getattr(st, "supervisorMaxIterations", 5) or 5),
                 "supervisorLlmMaxRetries": int(getattr(st, "supervisorLlmMaxRetries", 12) or 12),

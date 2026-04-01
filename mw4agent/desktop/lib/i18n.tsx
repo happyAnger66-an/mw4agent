@@ -97,6 +97,10 @@ const en: Record<string, string> = {
     "DAG mode runs each node once per message; participants are inferred from nodes.",
   orchestrateNodeMeta: "node",
   orchestrateRouterHint: "Router LLM selects the next speaker from participants.",
+  orchestrateRouterAgentRoles: "Router: agent roles",
+  orchestrateRouterAgentRolesHint:
+    "Describe each participant’s responsibilities. The router model uses this to pick the best next speaker.",
+  orchestrateRouterAgentRolePlaceholder: "e.g. code changes, review, docs…",
   orchestrateAll: "Orchestrations",
   orchestrateEmptyList: "No orchestrations yet.",
   orchestratePickOne: "Pick an orchestration on the left.",
@@ -358,6 +362,10 @@ const zhCN: Record<string, string> = {
   orchestrateDagNote: "DAG 模式下每条消息会按图执行一轮；参与者由节点内的 agentId 推导。",
   orchestrateNodeMeta: "节点",
   orchestrateRouterHint: "路由 LLM 会从参与者中选择下一位发话人。",
+  orchestrateRouterAgentRoles: "路由：各智能体角色",
+  orchestrateRouterAgentRolesHint:
+    "为每位参与者填写职责说明，路由模型会据此选择下一位发言者。",
+  orchestrateRouterAgentRolePlaceholder: "例如：写代码、审查、文档…",
   orchestrateAll: "全部编排",
   orchestrateEmptyList: "暂无编排。",
   orchestratePickOne: "请在左侧选择一个编排。",

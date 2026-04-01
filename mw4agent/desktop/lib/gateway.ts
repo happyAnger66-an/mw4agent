@@ -645,6 +645,8 @@ export type OrchestrateRunBody = {
     api_key?: string;
     thinking_level?: string;
   };
+  /** Per-agent role / identity for router LLM (strategy ``router_llm``). */
+  routerAgentRoles?: Record<string, string>;
   supervisorPipeline?: string[];
   supervisorLlm?: {
     provider?: string;
@@ -674,6 +676,7 @@ export async function orchestrateRun(
     strategy: body.strategy,
     dag: body.dag,
     routerLlm: body.routerLlm,
+    routerAgentRoles: body.routerAgentRoles,
     supervisorPipeline: body.supervisorPipeline,
     supervisorLlm: body.supervisorLlm,
     supervisorMaxIterations: body.supervisorMaxIterations,
@@ -705,6 +708,7 @@ export type OrchestrateCreateBody = {
     api_key?: string;
     thinking_level?: string;
   };
+  routerAgentRoles?: Record<string, string>;
   /** Order = pipeline A→B→C for ``strategy: supervisor_pipeline`` */
   supervisorPipeline?: string[];
   supervisorLlm?: {
@@ -735,6 +739,7 @@ export async function orchestrateCreate(
     strategy: body.strategy,
     dag: body.dag,
     routerLlm: body.routerLlm,
+    routerAgentRoles: body.routerAgentRoles,
     supervisorPipeline: body.supervisorPipeline,
     supervisorLlm: body.supervisorLlm,
     supervisorMaxIterations: body.supervisorMaxIterations,
@@ -770,6 +775,7 @@ export async function orchestrateUpdate(
     strategy: body.strategy,
     dag: body.dag,
     routerLlm: body.routerLlm,
+    routerAgentRoles: body.routerAgentRoles,
     supervisorPipeline: body.supervisorPipeline,
     supervisorLlm: body.supervisorLlm,
     supervisorMaxIterations: body.supervisorMaxIterations,
@@ -857,6 +863,8 @@ export type OrchestrateGetResult =
       /** Excludes ``api_key``; use ``routerApiKeyConfigured`` when editing. */
       routerLlm?: OrchestrateRouterLlmPublic | null;
       routerApiKeyConfigured?: boolean;
+      /** agentId -> role description for router (strategy ``router_llm``). */
+      routerAgentRoles?: Record<string, string>;
       supervisorPipeline?: string[];
       supervisorMaxIterations?: number;
       supervisorLlmMaxRetries?: number;
@@ -904,6 +912,10 @@ export async function orchestrateGet(orchId: string): Promise<OrchestrateGetResu
         ? (p.routerLlm as OrchestrateRouterLlmPublic)
         : undefined,
     routerApiKeyConfigured: Boolean(p.routerApiKeyConfigured),
+    routerAgentRoles:
+      p.routerAgentRoles != null && typeof p.routerAgentRoles === "object"
+        ? (p.routerAgentRoles as Record<string, string>)
+        : undefined,
     supervisorPipeline: Array.isArray(p.supervisorPipeline)
       ? (p.supervisorPipeline as string[])
       : undefined,
