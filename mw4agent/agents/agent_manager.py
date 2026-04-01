@@ -37,6 +37,9 @@ class AgentConfig:
     metadata: Optional[Dict[str, Any]] = None
     # Optional per-agent LLM overrides (merged with global ~/.mw4agent/mw4agent.json llm section).
     llm: Optional[Dict[str, Any]] = None
+    # Optional per-agent skill allowlist (merged with global skills.filter by intersection).
+    # If present and empty, the agent sees no skills.
+    skills: Optional[List[str]] = None
     # Optional UI avatar: basename only, resolved as ``/icons/headers/<avatar>`` in desktop.
     avatar: Optional[str] = None
 
@@ -109,6 +112,10 @@ class AgentManager:
         meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else None
         llm_raw = data.get("llm")
         llm = dict(llm_raw) if isinstance(llm_raw, dict) else None
+        skills_raw = data.get("skills")
+        skills: Optional[List[str]] = None
+        if isinstance(skills_raw, list):
+            skills = [str(x).strip() for x in skills_raw if str(x).strip()]
         av = data.get("avatar")
         avatar = str(av).strip() if isinstance(av, str) and str(av).strip() else None
         return AgentConfig(
@@ -119,6 +126,7 @@ class AgentManager:
             updated_at=updated_at,
             metadata=meta,
             llm=llm,
+            skills=skills,
             avatar=avatar,
         )
 
@@ -291,6 +299,27 @@ class AgentManager:
             else:
                 base[nk] = s
         cfg.llm = base or None
+        self.save(cfg)
+        return cfg
+
+    def update_skills(self, agent_id: str, skills: Optional[Any]) -> AgentConfig:
+        """Set per-agent ``skills`` allowlist in ``agent.json``.
+
+        - ``None``: remove the key override (agent inherits global-only filtering semantics).
+        - ``[]``: explicit empty allowlist (agent sees no skills in prompt).
+        - non-empty ``list``: intersection with global ``skills.filter`` is applied at runtime (plan B).
+        """
+        aid = normalize_agent_id(agent_id)
+        cfg = self.get(aid)
+        if cfg is None:
+            cfg = self.get_or_create(aid)
+        if skills is None:
+            cfg.skills = None
+        elif isinstance(skills, list):
+            cleaned = [str(x).strip() for x in skills if str(x).strip()]
+            cfg.skills = cleaned
+        else:
+            raise ValueError("skills must be null or a list of strings")
         self.save(cfg)
         return cfg
 

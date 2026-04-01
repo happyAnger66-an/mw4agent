@@ -1,13 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { configSectionGet, configSectionSet, configSectionsList, llmProvidersList, llmTest, type LlmProviderInfo } from "@/lib/gateway";
+import {
+  agentsUpdateSkills,
+  configSectionGet,
+  configSectionSet,
+  configSectionsList,
+  listAgents,
+  llmProvidersList,
+  llmTest,
+  type LlmProviderInfo,
+} from "@/lib/gateway";
 import { useI18n } from "@/lib/i18n";
 
 type JsonObject = Record<string, unknown>;
 type SettingsMode = "form" | "json";
 
-const FORM_SECTIONS = ["llm", "tools", "memory", "session", "channels"] as const;
+const FORM_SECTIONS = ["llm", "tools", "memory", "skills", "session", "channels"] as const;
 
 function safeJsonParseObject(text: string): { ok: true; value: JsonObject } | { ok: false } {
   try {
@@ -70,6 +79,13 @@ export function SettingsPanel() {
   );
   const [llmTesting, setLlmTesting] = useState(false);
 
+  const [listedAgents, setListedAgents] = useState<{ agentId: string; skills?: string[] | null }[]>([]);
+  const [skillsAgentId, setSkillsAgentId] = useState("");
+  const [skillsAgentCsv, setSkillsAgentCsv] = useState("");
+  const [skillsAgentBusy, setSkillsAgentBusy] = useState(false);
+  const [skillsAgentBanner, setSkillsAgentBanner] = useState<string | null>(null);
+  const [skillsAgentsError, setSkillsAgentsError] = useState<string | null>(null);
+
   const loadSections = useCallback(async () => {
     setError(null);
     const r = await configSectionsList();
@@ -127,6 +143,28 @@ export function SettingsPanel() {
   }, [loadSelected, selected]);
 
   useEffect(() => {
+    if (selected.trim() !== "skills") return;
+    void (async () => {
+      setSkillsAgentsError(null);
+      const r = await listAgents();
+      if (!r.ok) {
+        setSkillsAgentsError(r.error || "agents.list failed");
+        setListedAgents([]);
+        return;
+      }
+      setListedAgents(r.agents);
+      setSkillsAgentId((prev) => prev || r.agents[0]?.agentId || "main");
+    })();
+  }, [selected]);
+
+  useEffect(() => {
+    if (selected.trim() !== "skills") return;
+    const a = listedAgents.find((x) => x.agentId === skillsAgentId);
+    if (!a) return;
+    setSkillsAgentCsv(formatCsvList(a.skills ?? []));
+  }, [selected, skillsAgentId, listedAgents]);
+
+  useEffect(() => {
     if (selected.trim() !== "channels") return;
     if (!parsedEditor.ok) return;
     const obj = parsedEditor.value;
@@ -172,7 +210,14 @@ export function SettingsPanel() {
   }, [editor, selected, t]);
   const formSupported = useMemo(() => {
     const sec = selected.trim();
-    return sec === "llm" || sec === "tools" || sec === "memory" || sec === "session" || sec === "channels";
+    return (
+      sec === "llm" ||
+      sec === "tools" ||
+      sec === "memory" ||
+      sec === "skills" ||
+      sec === "session" ||
+      sec === "channels"
+    );
   }, [selected]);
 
   useEffect(() => {
@@ -405,6 +450,182 @@ export function SettingsPanel() {
             />
             {t("settingsMemoryEnabled")}
           </label>
+        </div>
+      );
+    }
+
+    if (sec === "skills") {
+      const filterCsv = formatCsvList((obj as JsonObject).filter);
+      const limRaw = (obj as JsonObject).limits;
+      const lim =
+        limRaw && typeof limRaw === "object" && !Array.isArray(limRaw) ? (limRaw as JsonObject) : {};
+      const maxIn = readNumber(lim.maxSkillsInPrompt ?? lim.max_skills_in_prompt);
+      const maxChars = readNumber(lim.maxSkillsPromptChars ?? lim.max_skills_prompt_chars);
+      return (
+        <div className="space-y-4">
+          <p className="text-[10px] text-[var(--muted)] leading-relaxed">{t("settingsSkillsGlobalHint")}</p>
+          <div className="space-y-1">
+            <div className="text-[10px] text-[var(--muted)]">{t("settingsSkillsGlobalFilter")}</div>
+            <input
+              className="w-full px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-xs font-mono"
+              value={filterCsv}
+              onChange={(e) =>
+                updateSection((cur) => ({
+                  ...cur,
+                  filter: parseCsvList(e.target.value),
+                }))
+              }
+              placeholder="skill-a, skill-b"
+            />
+            <div className="text-[10px] text-[var(--muted)]">{t("settingsSkillsGlobalFilterHint")}</div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <div className="text-[10px] text-[var(--muted)]">{t("settingsSkillsMaxInPrompt")}</div>
+              <input
+                className="w-full px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-xs"
+                value={maxIn}
+                onChange={(e) =>
+                  updateSection((cur) => {
+                    const v = e.target.value.trim();
+                    const nextLim: JsonObject = { ...lim };
+                    if (!v) {
+                      delete nextLim.maxSkillsInPrompt;
+                      delete nextLim.max_skills_in_prompt;
+                    } else {
+                      nextLim.maxSkillsInPrompt = Number(v);
+                    }
+                    return { ...cur, limits: nextLim };
+                  })
+                }
+                placeholder="150"
+              />
+            </div>
+            <div className="space-y-1">
+              <div className="text-[10px] text-[var(--muted)]">{t("settingsSkillsMaxPromptChars")}</div>
+              <input
+                className="w-full px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-xs"
+                value={maxChars}
+                onChange={(e) =>
+                  updateSection((cur) => {
+                    const v = e.target.value.trim();
+                    const nextLim: JsonObject = { ...lim };
+                    if (!v) {
+                      delete nextLim.maxSkillsPromptChars;
+                      delete nextLim.max_skills_prompt_chars;
+                    } else {
+                      nextLim.maxSkillsPromptChars = Number(v);
+                    }
+                    return { ...cur, limits: nextLim };
+                  })
+                }
+                placeholder="30000"
+              />
+            </div>
+          </div>
+
+          <div className="border-t border-[var(--border)] pt-4 space-y-3">
+            <div className="text-xs font-semibold">{t("settingsSkillsPerAgentTitle")}</div>
+            <p className="text-[10px] text-[var(--muted)] leading-relaxed">{t("settingsSkillsPerAgentHint")}</p>
+            {skillsAgentsError ? (
+              <div className="text-[10px] text-red-400">{skillsAgentsError}</div>
+            ) : null}
+            {skillsAgentBanner ? (
+              <div className="text-[10px] text-emerald-400 border border-emerald-500/30 bg-emerald-500/10 rounded-lg px-2 py-1">
+                {skillsAgentBanner}
+              </div>
+            ) : null}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <div className="text-[10px] text-[var(--muted)]">{t("settingsSkillsAgentPick")}</div>
+                <select
+                  className="w-full px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-xs font-mono"
+                  value={skillsAgentId}
+                  onChange={(e) => setSkillsAgentId(e.target.value)}
+                >
+                  {listedAgents.length ? (
+                    listedAgents.map((a) => (
+                      <option key={a.agentId} value={a.agentId}>
+                        {a.agentId}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="main">main</option>
+                  )}
+                </select>
+              </div>
+              <div className="space-y-1 sm:col-span-2">
+                <div className="text-[10px] text-[var(--muted)]">{t("settingsSkillsAgentAllowlist")}</div>
+                <input
+                  className="w-full px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-xs font-mono"
+                  value={skillsAgentCsv}
+                  onChange={(e) => setSkillsAgentCsv(e.target.value)}
+                  placeholder="skill-a, skill-b"
+                />
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="text-xs px-3 py-2 rounded-lg bg-[var(--accent)] text-white hover:opacity-95 disabled:opacity-50"
+                disabled={skillsAgentBusy || !skillsAgentId}
+                onClick={() => {
+                  void (async () => {
+                    setSkillsAgentBusy(true);
+                    setSkillsAgentBanner(null);
+                    const r = await agentsUpdateSkills(skillsAgentId, parseCsvList(skillsAgentCsv));
+                    setSkillsAgentBusy(false);
+                    if (!r.ok) {
+                      setSkillsAgentBanner(r.error || t("settingsSkillsAgentSaveFailed"));
+                      return;
+                    }
+                    const list = await listAgents();
+                    if (list.ok) setListedAgents(list.agents);
+                    setSkillsAgentBanner(t("settingsSkillsAgentSaved"));
+                    setTimeout(() => setSkillsAgentBanner(null), 2000);
+                  })();
+                }}
+              >
+                {skillsAgentBusy ? t("settingsSaving") : t("settingsSkillsAgentSave")}
+              </button>
+              <button
+                type="button"
+                className="text-xs px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--panel)] hover:opacity-90 disabled:opacity-50"
+                disabled={skillsAgentBusy || !skillsAgentId}
+                onClick={() => {
+                  void (async () => {
+                    setSkillsAgentBusy(true);
+                    setSkillsAgentBanner(null);
+                    const r = await agentsUpdateSkills(skillsAgentId, null);
+                    setSkillsAgentBusy(false);
+                    if (!r.ok) {
+                      setSkillsAgentBanner(r.error || t("settingsSkillsAgentSaveFailed"));
+                      return;
+                    }
+                    setSkillsAgentCsv("");
+                    const list = await listAgents();
+                    if (list.ok) setListedAgents(list.agents);
+                    setSkillsAgentBanner(t("settingsSkillsAgentCleared"));
+                    setTimeout(() => setSkillsAgentBanner(null), 2000);
+                  })();
+                }}
+              >
+                {t("settingsSkillsAgentClearOverride")}
+              </button>
+              <button
+                type="button"
+                className="text-xs px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--panel)] hover:opacity-90"
+                onClick={() => {
+                  const a = listedAgents.find((x) => x.agentId === skillsAgentId);
+                  setSkillsAgentCsv(formatCsvList(a?.skills ?? []));
+                  setSkillsAgentBanner(t("settingsSkillsAgentReloaded"));
+                  setTimeout(() => setSkillsAgentBanner(null), 1500);
+                }}
+              >
+                {t("settingsSkillsAgentReload")}
+              </button>
+            </div>
+          </div>
         </div>
       );
     }
@@ -1074,12 +1295,18 @@ export function SettingsPanel() {
   }, [
     channelJsonEditor,
     formSupported,
+    listedAgents,
     llmProviders,
     llmTestResult,
     llmTesting,
     parsedEditor,
     selected,
     selectedChannelType,
+    skillsAgentBanner,
+    skillsAgentBusy,
+    skillsAgentCsv,
+    skillsAgentId,
+    skillsAgentsError,
     t,
     updateSection,
   ]);

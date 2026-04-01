@@ -5,9 +5,10 @@
 ## 1. 配置文件位置与格式
 
 - **路径**：默认 `~/.mw4agent/mw4agent.json`；可通过环境变量 `MW4AGENT_CONFIG_DIR` 指定目录（如测试或多环境）。
-- **格式**：单一 JSON 文件，顶层按**区块（section）**组织，当前支持的区块：
+- **格式**：单一 JSON 文件，顶层按**区块（section）**组织，当前支持的区块包括：
   - **`llm`**：LLM 提供商与模型（provider、model_id、base_url、api_key 等）。
   - **`channels`**：各 channel 的配置（当前支持 feishu、console）。
+  - **`skills`**：技能目录的全局过滤与注入上限（`filter`、`limits` 等）；每智能体还可在 `~/.mw4agent/agents/<id>/agent.json` 中配置 `skills` 与全局 **取交集**（方案 B）。详见 [manuals/configuration.md](../manuals/configuration.md) 中「skills」一节。
 
 示例：
 

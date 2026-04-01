@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ...config.root import read_root_section
+from ..agent_manager import AgentManager
 from ...plugin.loader import get_plugin_skill_source
 from ...skills import SkillManager, get_default_skill_manager
 
@@ -22,6 +23,71 @@ def _normalize_skill_filter(skill_filter: Optional[Sequence[str]]) -> Optional[L
         if val and val not in normalized:
             normalized.append(val)
     return normalized or None
+
+
+def _normalize_skill_filter_keep_empty(skill_filter: Optional[Sequence[str]]) -> Optional[List[str]]:
+    """Like _normalize_skill_filter but preserves explicit empty list as [].
+
+    Used for per-agent skills allowlists where [] means the agent sees no skills.
+    """
+    if skill_filter is None:
+        return None
+    normalized: List[str] = []
+    for item in skill_filter:
+        val = str(item or "").strip()
+        if val and val not in normalized:
+            normalized.append(val)
+    return normalized
+
+
+def resolve_global_skill_filter() -> Optional[List[str]]:
+    """Global skills.filter from ~/.mw4agent/mw4agent.json (normalized).
+
+    Backward compatible: missing/empty filter means no filtering.
+    """
+    section = read_root_section("skills", default={})
+    cfg_filter = section.get("filter") if isinstance(section, dict) else None
+    return _normalize_skill_filter(cfg_filter if isinstance(cfg_filter, list) else None)
+
+
+def resolve_agent_skill_filter(agent_id: Optional[str]) -> Optional[List[str]]:
+    """Per-agent skills allowlist from ~/.mw4agent/agents/<agentId>/agent.json.
+
+    If key exists and is empty list, returns [] (meaning no skills for this agent).
+    If missing, returns None.
+    """
+    try:
+        cfg = AgentManager().get(str(agent_id or "main"))
+        if cfg is None:
+            return None
+        if cfg.skills is None:
+            return None
+        return _normalize_skill_filter_keep_empty(cfg.skills)
+    except Exception:
+        return None
+
+
+def resolve_effective_skill_filter_for_agent(
+    agent_id: Optional[str],
+    *,
+    skill_filter: Optional[Sequence[str]] = None,
+) -> Optional[List[str]]:
+    """Resolve effective skill filter using plan B (intersection)."""
+
+    def _intersect(a: Optional[List[str]], b: Optional[List[str]]) -> Optional[List[str]]:
+        if a is None:
+            return b
+        if b is None:
+            return a
+        if a == [] or b == []:
+            return []
+        bs = set(b)
+        return [x for x in a if x in bs]
+
+    caller = _normalize_skill_filter_keep_empty(skill_filter) if skill_filter is not None else None
+    merged = _intersect(resolve_global_skill_filter(), resolve_agent_skill_filter(agent_id))
+    merged = _intersect(merged, caller)
+    return merged
 
 
 def _resolve_workspace_skill_paths(workspace_dir: Optional[str]) -> List[Tuple[str, Path]]:
@@ -204,11 +270,8 @@ def build_skill_snapshot(
         source_by_name[name] = "plugin"
         location_by_name[name] = "<plugin>"
 
-    section = read_root_section("skills", default={})
-    cfg_filter = section.get("filter") if isinstance(section, dict) else None
-    merged_filter = _normalize_skill_filter(skill_filter) or _normalize_skill_filter(
-        cfg_filter if isinstance(cfg_filter, list) else None
-    )
+    # Backward compatible: caller filter overrides global config filter when non-empty.
+    merged_filter = _normalize_skill_filter(skill_filter) or resolve_global_skill_filter()
 
     items: List[Dict[str, Any]] = []
     filtered_out: List[str] = []

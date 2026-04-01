@@ -817,6 +817,9 @@ def create_app(
                     llm_key_configured = bool(
                         str(cfg.llm.get("api_key") or "").strip()
                     )
+                skills_out: Optional[List[str]] = None
+                if cfg.skills is not None:
+                    skills_out = list(cfg.skills)
                 items.append(
                     {
                         "agentId": aid,
@@ -829,10 +832,47 @@ def create_app(
                         "avatar": cfg.avatar,
                         "llm": llm_safe,
                         "llmApiKeyConfigured": llm_key_configured,
+                        "skills": skills_out,
                         "runStatus": run_st,
                     }
                 )
             return {"id": req_id, "ok": True, "payload": {"agents": items}}
+
+        if method == "agents.update_skills":
+            raw_id = str(params.get("agentId") or "").strip()
+            if not raw_id:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "invalid_request", "message": "agentId is required"},
+                }
+            if "skills" not in params:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "invalid_request", "message": "skills is required (use null to clear)"},
+                }
+            skills_raw = params.get("skills")
+            try:
+                cfg = agent_manager.update_skills(raw_id, skills_raw)
+            except ValueError as e:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "invalid_request", "message": str(e)},
+                }
+            except Exception as e:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "unavailable", "message": str(e)},
+                }
+            out = None if cfg.skills is None else list(cfg.skills)
+            return {
+                "id": req_id,
+                "ok": True,
+                "payload": {"agentId": cfg.agent_id, "skills": out},
+            }
 
         if method == "stats.agent.get":
             raw_aid = params.get("agentId", params.get("agent_id"))

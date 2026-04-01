@@ -42,7 +42,7 @@ from ...config import get_default_config_manager
 from ...config.paths import resolve_agent_workspace_dir
 from ...llm import generate_reply, generate_reply_with_tools, LLMUsage
 from ..reasoning import split_reasoning_and_text
-from ..skills.snapshot import build_skill_snapshot
+from ..skills.snapshot import build_skill_snapshot, resolve_effective_skill_filter_for_agent
 from ..stats.agent_usage import apply_llm_usage
 
 from mw4agent.log import get_logger
@@ -454,8 +454,10 @@ class AgentRunner:
 
         # --- Attach skills snapshot to session & build prompt --------------
         # logger.info(f"Building skills snapshot for session {session_entry.session_id}")
+        effective_skill_filter = resolve_effective_skill_filter_for_agent(params.agent_id)
         skills_snapshot = build_skill_snapshot(
-            workspace_dir=agent_workspace_dir
+            workspace_dir=agent_workspace_dir,
+            skill_filter=effective_skill_filter,
         )
         skills_prompt = ''
         if skills_snapshot.get("prompt"):

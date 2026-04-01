@@ -189,6 +189,8 @@ export type ListedAgent = {
   sessionsFile?: string;
   /** Basename under ``/icons/headers/`` (desktop UI). */
   avatar?: string;
+  /** Per-agent skill name allowlist (intersected with global ``skills.filter``). */
+  skills?: string[] | null;
   /** Omitted ``api_key`` for safety; use ``llmApiKeyConfigured`` when needed. */
   llm?: ListedAgentLlm;
   llmApiKeyConfigured?: boolean;
@@ -212,6 +214,30 @@ export async function listAgents(): Promise<ListAgentsResult> {
   }
   const agents = (r.payload.agents as ListedAgent[]) ?? [];
   return { ok: true, agents };
+}
+
+export type AgentsUpdateSkillsResult =
+  | { ok: true; agentId: string; skills: string[] | null }
+  | { ok: false; error?: string };
+
+/** Set per-agent ``skills`` in ``agent.json``. Pass ``null`` to remove override (inherit global-only). */
+export async function agentsUpdateSkills(
+  agentId: string,
+  skills: string[] | null
+): Promise<AgentsUpdateSkillsResult> {
+  const r = await callRpc("agents.update_skills", {
+    agentId: (agentId || "").trim() || "main",
+    skills,
+  });
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "agents.update_skills failed" };
+  }
+  const p = r.payload as { agentId?: string; skills?: string[] | null };
+  return {
+    ok: true,
+    agentId: String(p.agentId ?? agentId),
+    skills: p.skills === undefined ? null : p.skills,
+  };
 }
 
 export type AgentLlmUsageStats = {
