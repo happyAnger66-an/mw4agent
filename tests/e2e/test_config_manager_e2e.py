@@ -30,7 +30,7 @@ def secret_key(monkeypatch) -> str:
     """Set up a test secret key and ensure encryption is enabled."""
     key = base64.b64encode(os.urandom(32)).decode("ascii")
     monkeypatch.setenv("MW4AGENT_SECRET_KEY", key)
-    monkeypatch.delenv("MW4AGENT_IS_ENC", raising=False)  # 确保加密开启，不受外部环境影响
+    monkeypatch.setenv("MW4AGENT_IS_ENC", "1")  # 确保加密开启，不受外部环境影响
     return key
 
 
@@ -121,6 +121,38 @@ def test_config_manager_plaintext_fallback(config_manager: ConfigManager, monkey
     # Read should work (fallback enabled by default)
     loaded_data = config_manager.read_config("plaintext_config")
     assert loaded_data == config_data
+
+
+def test_encrypted_config_missing_key_refuses_overwrite(config_manager: ConfigManager, monkeypatch) -> None:
+    """If encryption is enabled but key is missing, refuse to overwrite encrypted config."""
+    # First write an encrypted file with a valid key.
+    import base64
+    from mw4agent.crypto.secure_io import MAGIC_HEADER
+
+    key = base64.b64encode(os.urandom(32)).decode("ascii")
+    monkeypatch.setenv("MW4AGENT_SECRET_KEY", key)
+    monkeypatch.setenv("MW4AGENT_IS_ENC", "1")
+    config_manager.write_config("protected", {"llm": {"provider": "openai", "model_id": "gpt-4o-mini"}})
+
+    cfg_path = config_manager._get_config_path("protected")
+    before = cfg_path.read_bytes()
+    assert before.startswith(MAGIC_HEADER)
+
+    # Now simulate a restart where encryption remains enabled but key is missing.
+    monkeypatch.delenv("MW4AGENT_SECRET_KEY", raising=False)
+    import mw4agent.crypto.secure_io
+    monkeypatch.setattr(mw4agent.crypto.secure_io, "_default_store", None)
+
+    # Reading should raise (do not silently fall back to plaintext for encrypted files).
+    with pytest.raises(Exception):
+        config_manager.read_config("protected")
+
+    # Writing should raise and MUST NOT clobber the encrypted file with plaintext.
+    with pytest.raises(Exception):
+        config_manager.write_config("protected", {"llm": {"provider": "deepseek"}})
+
+    after = cfg_path.read_bytes()
+    assert after == before
 
 
 def test_get_default_config_manager(tmp_path: Path, monkeypatch, secret_key: str) -> None:

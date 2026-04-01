@@ -8,9 +8,11 @@ import { useI18n } from "@/lib/i18n";
 import { AgentsPanel } from "@/components/AgentsPanel";
 import { ChatPanel } from "@/components/ChatPanel";
 import { OrchestratePanel } from "@/components/OrchestratePanel";
+import { SettingsPanel } from "@/components/SettingsPanel";
 import { SkillsPanel } from "@/components/SkillsPanel";
+import { StatsPanel } from "@/components/StatsPanel";
 
-type MainView = "home" | "agents" | "skills" | "orchestrate";
+type MainView = "home" | "agents" | "skills" | "orchestrate" | "stats" | "settings";
 
 export function AppShell() {
   const { t, locale, setLocale } = useI18n();
@@ -138,6 +140,48 @@ export function AppShell() {
             />
             {t("skillsNav")}
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              setMainView("stats");
+              setChatOpen(false);
+            }}
+            className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-colors ${
+              mainView === "stats" && !chatOpen
+                ? "bg-[var(--accent)] text-white"
+                : "text-[var(--text)] hover:bg-[var(--bg)]/80"
+            }`}
+          >
+            <Image
+              src="/icons/stats.png"
+              alt=""
+              width={20}
+              height={20}
+              className="h-5 w-5 shrink-0 object-contain opacity-90"
+            />
+            {t("statsNav")}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setMainView("settings");
+              setChatOpen(false);
+            }}
+            className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-colors ${
+              mainView === "settings" && !chatOpen
+                ? "bg-[var(--accent)] text-white"
+                : "text-[var(--text)] hover:bg-[var(--bg)]/80"
+            }`}
+          >
+            <Image
+              src="/icons/settings.png"
+              alt=""
+              width={20}
+              height={20}
+              className="h-5 w-5 shrink-0 object-contain opacity-90"
+            />
+            {t("settingsNav")}
+          </button>
         </nav>
 
         <div className="mt-auto border-t border-[var(--border)] p-3 space-y-2">
@@ -226,6 +270,10 @@ export function AppShell() {
           <AgentsPanel onOpenChatWithAgent={openChatWithAgent} />
         ) : mainView === "orchestrate" ? (
           <OrchestratePanel autoOpenKey={orchOpenKey} />
+        ) : mainView === "stats" ? (
+          <StatsPanel />
+        ) : mainView === "settings" ? (
+          <SettingsPanel />
         ) : (
           <SkillsPanel />
         )}

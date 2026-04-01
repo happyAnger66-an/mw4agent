@@ -14,21 +14,37 @@
 
 ### 1.2 Provider 与请求方式
 
-当前仅实现 **Brave Search API**：
+当前实现支持 **Brave / Perplexity / Serper** 三种 provider：
 
-- endpoint：`https://api.search.brave.com/res/v1/web/search`
-- 鉴权 header：`X-Subscription-Token: <api_key>`
-- 网络实现：Python `urllib.request.urlopen`（同步 I/O；在 async tool 中直接调用）
+- **brave**
+  - endpoint：`https://api.search.brave.com/res/v1/web/search`
+  - header：`X-Subscription-Token: <api_key>`
+- **perplexity**
+  - endpoint：`https://api.perplexity.ai/chat/completions`
+  - header：`Authorization: Bearer <api_key>`
+- **serper**（google.serper.dev）
+  - endpoint：`https://google.serper.dev/search`
+  - header：`X-API-KEY: <api_key>`
+
+网络实现：Python `urllib.request.urlopen`（同步 I/O；在 async tool 中直接调用）。
 
 ### 1.3 配置与开关
 
 从 root config 的 `tools.web.search` 读取：
 
-- `enabled`：bool（默认 true）
-- `apiKey/api_key`：优先 config；否则读环境变量 `BRAVE_API_KEY`
+- `enabled`：bool（默认 false，需要显式开启）
+- `provider`：`brave/perplexity/serper`（可选；不填则按可用 key 自动选择）
+- `apiKey/api_key`：通用 key（可选）
+- `<provider>.apiKey/api_key`：按 provider 的 key（可选，优先级更高）
 - `timeoutSeconds/timeout_seconds`：默认 10s
 - `cacheTtlMinutes/cache_ttl_minutes`：默认 5min
 - `maxResults`：默认 5（并限制最大 10）
+
+API Key 解析优先级（高→低）：
+
+1. `tools.web.search.<provider>.apiKey`（或 `api_key`）
+2. `tools.web.search.apiKey`（或 `api_key`）
+3. 环境变量：`PERPLEXITY_API_KEY` / `BRAVE_API_KEY` / `SERPER_API_KEY`
 
 ### 1.4 参数 schema（对 LLM 暴露）
 

@@ -11,7 +11,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from ..crypto import EncryptionConfigError, get_default_encrypted_store
+from ..crypto import EncryptionConfigError, get_default_encrypted_store, is_encryption_enabled
+from ..crypto.secure_io import MAGIC_HEADER
 
 
 class ConfigManager:
@@ -54,24 +55,41 @@ class ConfigManager:
         if not path.exists():
             return default or {}
 
-        try:
-            store = get_default_encrypted_store()
-            data = store.read_json(str(path), fallback_plaintext=True)
-            if isinstance(data, dict):
-                return data
-            return default or {}
-        except EncryptionConfigError as e:
-            # If encryption is not configured, try plaintext fallback
-            print(f"Warning: Encryption not configured, falling back to plaintext: {e}")
+        if is_encryption_enabled():
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        return data
-                    return default or {}
-            except Exception as e2:
-                print(f"Warning: Failed to load plaintext config: {e2}")
+                store = get_default_encrypted_store()
+                data = store.read_json(str(path), fallback_plaintext=True)
+                if isinstance(data, dict):
+                    return data
                 return default or {}
+            except EncryptionConfigError as e:
+                # Encryption explicitly enabled but misconfigured.
+                #
+                # Important safety rule:
+                # - If the file is encrypted, DO NOT fall back to plaintext parsing; surface the error.
+                #   Falling back would make the config appear "empty", and subsequent writes could
+                #   overwrite an encrypted file with plaintext, losing data.
+                try:
+                    with open(path, "rb") as f:
+                        head = f.read(len(MAGIC_HEADER))
+                    if head.startswith(MAGIC_HEADER):
+                        raise
+                except OSError:
+                    # If we cannot read the file header, propagate the original error below.
+                    pass
+                print(f"Warning: Encryption not configured, falling back to plaintext: {e}")
+            except Exception as e:
+                print(f"Warning: Failed to load config (encrypted path): {e}")
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+                return default or {}
+        except Exception as e2:
+            print(f"Warning: Failed to load plaintext config: {e2}")
+            return default or {}
 
     def write_config(self, name: str, data: Dict[str, Any]) -> None:
         """Write a configuration file (encrypted).
@@ -81,14 +99,22 @@ class ConfigManager:
             data: Configuration dictionary to write.
         """
         path = self._get_config_path(name)
-        try:
-            store = get_default_encrypted_store()
-            store.write_json(str(path), data)
-        except EncryptionConfigError:
-            # Fallback to plaintext if encryption is not configured
-            print("Warning: Encryption not configured, writing plaintext config")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+        if is_encryption_enabled():
+            try:
+                store = get_default_encrypted_store()
+                store.write_json(str(path), data)
+                return
+            except EncryptionConfigError as e:
+                # Encryption explicitly enabled but misconfigured.
+                #
+                # Safety rule: refuse to write plaintext when encryption is enabled, to avoid
+                # overwriting an encrypted config file (or unintentionally storing secrets in plaintext).
+                raise
+            except Exception as e:
+                print(f"Warning: Failed to write config (encrypted path): {e}")
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
 
     def delete_config(self, name: str) -> bool:
         """Delete a configuration file.

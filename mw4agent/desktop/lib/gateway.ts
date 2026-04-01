@@ -33,6 +33,90 @@ export type RpcResult = {
   runId?: string;
 };
 
+export type ConfigSectionsListResult =
+  | { ok: true; sections: string[] }
+  | { ok: false; error?: string };
+
+export async function configSectionsList(): Promise<ConfigSectionsListResult> {
+  const r = await callRpc("config.sections.list", {});
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "config.sections.list failed" };
+  }
+  const sections = Array.isArray(r.payload.sections) ? (r.payload.sections as string[]) : [];
+  return { ok: true, sections };
+}
+
+export type ConfigSectionGetResult =
+  | { ok: true; section: string; value: Record<string, unknown> }
+  | { ok: false; error?: string };
+
+export async function configSectionGet(section: string): Promise<ConfigSectionGetResult> {
+  const r = await callRpc("config.section.get", { section: section.trim() });
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "config.section.get failed" };
+  }
+  const sec = String(r.payload.section ?? section);
+  const raw = r.payload.value;
+  const value =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  return { ok: true, section: sec, value };
+}
+
+export type ConfigSectionSetResult =
+  | { ok: true; section: string }
+  | { ok: false; error?: string };
+
+export async function configSectionSet(
+  section: string,
+  value: Record<string, unknown>
+): Promise<ConfigSectionSetResult> {
+  const r = await callRpc("config.section.set", { section: section.trim(), value });
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "config.section.set failed" };
+  }
+  return { ok: true, section: String(r.payload.section ?? section) };
+}
+
+export type LlmProviderInfo = {
+  id: string;
+  default_base_url?: string | null;
+  default_model?: string;
+  api_key_env?: string;
+  require_api_key?: boolean;
+  base_url_required?: boolean;
+};
+
+export type LlmProvidersListResult =
+  | { ok: true; providers: string[]; providerInfos: LlmProviderInfo[] }
+  | { ok: false; error?: string };
+
+export async function llmProvidersList(): Promise<LlmProvidersListResult> {
+  const r = await callRpc("llm.providers.list", {});
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "llm.providers.list failed" };
+  }
+  const providers = Array.isArray(r.payload.providers) ? (r.payload.providers as string[]) : [];
+  const infos = Array.isArray(r.payload.providerInfos) ? (r.payload.providerInfos as LlmProviderInfo[]) : [];
+  return { ok: true, providers, providerInfos: infos };
+}
+
+export type LlmTestResult =
+  | { ok: true; success: boolean; message: string; preview?: string | null }
+  | { ok: false; error?: string };
+
+export async function llmTest(llm: Record<string, unknown>): Promise<LlmTestResult> {
+  const r = await callRpc("llm.test", { llm });
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "llm.test failed" };
+  }
+  return {
+    ok: true,
+    success: Boolean(r.payload.success),
+    message: String(r.payload.message || ""),
+    preview: typeof r.payload.preview === "string" ? (r.payload.preview as string) : null,
+  };
+}
+
 function newRpcId(): string {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
     return crypto.randomUUID();
@@ -128,6 +212,50 @@ export async function listAgents(): Promise<ListAgentsResult> {
   }
   const agents = (r.payload.agents as ListedAgent[]) ?? [];
   return { ok: true, agents };
+}
+
+export type AgentLlmUsageStats = {
+  promptTokensTotal?: number;
+  completionTokensTotal?: number;
+  totalTokensTotal?: number;
+  numRequests?: number;
+};
+
+export type StatsAgentListRow = {
+  agentId: string;
+  path: string;
+  llmUsage?: AgentLlmUsageStats | null;
+  updatedAtMs?: number;
+};
+
+export type StatsAgentsListResult =
+  | { ok: true; agents: StatsAgentListRow[] }
+  | { ok: false; error?: string };
+
+export async function statsAgentsList(): Promise<StatsAgentsListResult> {
+  const r = await callRpc("stats.agents.list", {});
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "stats.agents.list failed" };
+  }
+  const agents = (r.payload.agents as StatsAgentListRow[]) ?? [];
+  return { ok: true, agents };
+}
+
+export type StatsAgentGetResult =
+  | { ok: true; agentId: string; path: string; stats: Record<string, unknown> }
+  | { ok: false; error?: string };
+
+export async function statsAgentGet(agentId: string): Promise<StatsAgentGetResult> {
+  const r = await callRpc("stats.agent.get", { agentId: (agentId || "").trim() || "main" });
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "stats.agent.get failed" };
+  }
+  return {
+    ok: true,
+    agentId: String(r.payload.agentId ?? agentId),
+    path: String(r.payload.path ?? ""),
+    stats: (r.payload.stats as Record<string, unknown>) ?? {},
+  };
 }
 
 export type AgentSessionHistoryMessage = {

@@ -185,6 +185,8 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     dagProgress?: Record<string, { status?: string; outputPreview?: string; error?: string }>;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [participantsOpen, setParticipantsOpen] = useState(false);
+  const participantsWrapRef = useRef<HTMLDivElement | null>(null);
 
   const [orchFormOpen, setOrchFormOpen] = useState(false);
   const [orchFormMode, setOrchFormMode] = useState<"create" | "edit">("create");
@@ -723,7 +725,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     // When user enters Orchestrate view, refresh data (do not auto-open create dialog).
     void loadAgents();
     void loadOrches();
-  }, [autoOpenKey]);
+  }, [autoOpenKey, loadAgents, loadOrches]);
 
   useEffect(() => {
     if (!selectedOrchId.trim()) return;
@@ -903,6 +905,33 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     [loadOrches, selectedOrchId, t]
   );
 
+  const selectedTitle = useMemo(() => {
+    if (!selectedOrchId.trim()) return "";
+    const name = (selected?.name || "").trim();
+    if (name) return name;
+    const fromList = orches.find((o) => o.orchId === selectedOrchId)?.name;
+    const fromListName = (fromList || "").trim();
+    return fromListName || selectedOrchId.slice(0, 8);
+  }, [orches, selected?.name, selectedOrchId]);
+
+  const selectedParticipants = useMemo(() => {
+    const parts = selected?.participants ?? [];
+    const norm = parts.map((p) => (p || "").trim()).filter(Boolean);
+    return Array.from(new Set(norm)).sort((a, b) => a.localeCompare(b));
+  }, [selected?.participants]);
+
+  useEffect(() => {
+    if (!participantsOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const root = participantsWrapRef.current;
+      if (!root) return;
+      if (e.target instanceof Node && root.contains(e.target)) return;
+      setParticipantsOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [participantsOpen]);
+
   return (
     <div className="flex h-full min-h-0 w-full">
       <div className="w-64 shrink-0 border-r border-[var(--border)] bg-[var(--panel)] p-3 flex flex-col gap-3">
@@ -1029,6 +1058,66 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-4">
           {error ? <p className="text-xs text-red-500/90 mb-2">{error}</p> : null}
+          {selectedOrchId ? (
+            <div className="mb-2 flex items-center gap-3 rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 py-2">
+              <div className="min-w-0 flex-1 flex items-center gap-2">
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold truncate" title={selectedTitle}>
+                    {selectedTitle}
+                  </div>
+                  <div className="text-[10px] text-[var(--muted)]">
+                    {t("orchestrateStatus")}: {selected?.status || "—"}
+                  </div>
+                </div>
+              </div>
+              <div ref={participantsWrapRef} className="relative shrink-0">
+                <button
+                  type="button"
+                  className="text-xs px-2 py-1 rounded-md border border-[var(--border)] bg-[var(--bg)] hover:opacity-90"
+                  onClick={() => setParticipantsOpen((v) => !v)}
+                  aria-label="Show agents"
+                  title={selectedParticipants.join(", ")}
+                >
+                  Agents: {selectedParticipants.length}
+                </button>
+                {participantsOpen ? (
+                  <div className="absolute right-0 mt-2 w-56 rounded-lg border border-[var(--border)] bg-[var(--bg)] shadow-xl overflow-hidden z-20">
+                    <div className="px-3 py-2 text-[10px] text-[var(--muted)] border-b border-[var(--border)]">
+                      {selectedParticipants.length ? "Agents" : "No agents"}
+                    </div>
+                    <div className="max-h-56 overflow-auto">
+                      {selectedParticipants.length ? (
+                        <ul className="py-1">
+                          {selectedParticipants.map((aid) => {
+                            const known = listedAgents.find((a) => a.agentId === aid);
+                            const configured = Boolean(known?.configured);
+                            return (
+                              <li key={aid}>
+                                <button
+                                  type="button"
+                                  className="w-full text-left px-3 py-2 text-xs hover:bg-[var(--panel)] flex items-center justify-between gap-2"
+                                  onClick={() => setParticipantsOpen(false)}
+                                >
+                                  <span className="font-mono truncate" title={aid}>
+                                    {aid}
+                                  </span>
+                                  <span className="text-[10px] text-[var(--muted)] shrink-0">
+                                    {configured ? "configured" : ""}
+                                  </span>
+                                </button>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : (
+                        <div className="px-3 py-3 text-xs text-[var(--muted)]">—</div>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
           {selectedOrchId && live ? (
             <div className="mb-2 rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 py-2">
               <div className="flex flex-wrap items-center gap-2 text-[10px] text-[var(--muted)]">

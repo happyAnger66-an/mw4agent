@@ -4,10 +4,19 @@
 			"path": "."
 		},
 		{
-			"path": "../../../codes/agents/openclaw"
+			"path": "../../../codes/clawbots/openclaw"
 		},
 		{
-			"path": "../../../codes/clawbots/openclaw"
+			"path": "../ag2"
+		},
+		{
+			"path": "../Shannon"
+		},
+		{
+			"path": "../swarm"
+		},
+		{
+			"path": "../openai-agents-python"
 		}
 	],
 	"settings": {}

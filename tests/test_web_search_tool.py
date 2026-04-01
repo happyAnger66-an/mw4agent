@@ -12,6 +12,15 @@ async def test_web_search_missing_api_key(monkeypatch):
 
     monkeypatch.delenv("BRAVE_API_KEY", raising=False)
     monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
+    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+
+    def _cfg(section, default=None):
+        # Force empty tools so web_search stays disabled regardless of host ~/.mw4agent.
+        if section == "tools":
+            return {}
+        return default
+
+    monkeypatch.setattr("mw4agent.agents.tools.web_search_tool.read_root_section", _cfg)
 
     tool = WebSearchTool()
     res = await tool.execute("tc1", {"query": "hello"})
@@ -168,4 +177,67 @@ async def test_web_search_perplexity_parsing(monkeypatch):
     assert "EXTERNAL_UNTRUSTED_CONTENT" in (data.get("content") or "")
     assert data.get("citations") == ["https://c1.example", "https://c2.example"]
     assert data.get("results") and data["results"][0]["url"] == "https://r1.example"
+
+
+@pytest.mark.asyncio
+async def test_web_search_serper_parsing(monkeypatch):
+    from mw4agent.agents.tools.web_search_tool import WebSearchTool
+
+    def _cfg(section, default=None):
+        if section == "tools":
+            return {
+                "web": {
+                    "search": {
+                        "enabled": True,
+                        "provider": "serper",
+                        "proxy": "http://127.0.0.1:9",
+                        "serper": {"apiKey": "serper_test_key"},
+                    }
+                }
+            }
+        return default
+
+    monkeypatch.setattr("mw4agent.agents.tools.web_search_tool.read_root_section", _cfg)
+
+    api_payload = {
+        "organic": [
+            {"title": "T1", "link": "https://a.example", "snippet": "S1"},
+            {"title": "T2", "link": "https://b.example", "snippet": "S2"},
+        ]
+    }
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(api_payload).encode("utf-8")
+
+    opens = []
+
+    def fake_open(req, *, timeout=0, proxy=None):
+        opens.append((req, proxy))
+        return _Resp()
+
+    monkeypatch.setattr("mw4agent.agents.tools.web_search_tool._urlopen", fake_open)
+
+    tool = WebSearchTool()
+    res = await tool.execute(
+        "tc_s1",
+        {"query": "mw4agent", "count": 5, "gl": "cn", "hl": "zh-cn", "page": 2},
+    )
+    assert res.success is True
+    data = res.result
+    assert data["provider"] == "serper"
+    assert data["count"] == 2
+    assert data["results"][0]["url"] == "https://a.example"
+    assert "EXTERNAL_UNTRUSTED_CONTENT" in (data["results"][0].get("title") or "")
+    assert opens
+    req0, proxy0 = opens[0]
+    assert proxy0 == "http://127.0.0.1:9"
+    hdrs = {k: v for k, v in req0.header_items()}
+    assert hdrs.get("X-api-key") == "serper_test_key"
 

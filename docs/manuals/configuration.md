@@ -19,10 +19,10 @@
 
 mw4agent 的配置读写走 `ConfigManager` + 加密框架：
 
-- **启用开关**：`MW4AGENT_IS_ENC=1`（默认视实现而定；未配置密钥时会降级为明文读写并打印 warning）
+- **启用开关**：`MW4AGENT_IS_ENC=1`（默认关闭；开启后若未配置密钥会降级为明文读写并打印 warning）
 - **密钥**：`MW4AGENT_SECRET_KEY`（base64 编码的 32 bytes）
 
-> 说明：测试中经常会设置 `MW4AGENT_IS_ENC=0` 或提供一个 dummy key 以避免输出噪声。
+> 说明：默认不启用加密；只有显式设置 `MW4AGENT_IS_ENC=1` 才会尝试加密读写。
 
 ---
 
@@ -36,6 +36,8 @@ mw4agent 的配置读写走 `ConfigManager` + 加密框架：
 - **`llm.model_id`**：模型 id（有些地方也兼容 `llm.model` 字段）
 - **`llm.base_url`**：OpenAI-compatible base URL（可为空 → 使用 provider 默认值）
 - **`llm.api_key`**：API Key（可为空 → 走 env）
+- **`llm.contextWindow`**：上下文窗口大小（token，近似裁剪；可选；也兼容 `context_window`）
+- **`llm.maxTokens`**：最大输出 token（传给 OpenAI-compatible 的 `max_tokens`；可选；也兼容 `max_tokens`）
 
 ### 2.2 环境变量覆盖
 
@@ -51,6 +53,11 @@ API Key 通常从以下读取（不同 provider 不同 env）：
 - `DEEPSEEK_API_KEY`（deepseek）
 - `MW4AGENT_LLM_API_KEY`（vllm/aliyun-bailian 等通用）
 
+可选的 runtime 限制（优先级：agent `agent.json` 的 `llm.*` → 全局 `llm.*` → env）：
+
+- `MW4AGENT_LLM_CONTEXT_WINDOW`：等价于 `llm.contextWindow`
+- `MW4AGENT_LLM_MAX_TOKENS`：等价于 `llm.maxTokens`
+
 ### 2.3 示例
 
 ```json
@@ -59,7 +66,9 @@ API Key 通常从以下读取（不同 provider 不同 env）：
     "provider": "openai",
     "model_id": "gpt-4o-mini",
     "base_url": "https://api.openai.com",
-    "api_key": "sk-..."
+    "api_key": "sk-...",
+    "contextWindow": 128000,
+    "maxTokens": 4096
   }
 }
 ```
@@ -208,18 +217,29 @@ run 级开关：
 `web_search` 工具的配置位于：
 
 - **`tools.web.search.enabled`**：是否启用并暴露给模型（当前默认 **false**，需要显式开启）
-- **`tools.web.search.provider`**：`brave` 或 `perplexity`（可选；不填则按 key 自动选择）
-- **`tools.web.search.apiKey`**：通用 key（可选；也可 provider-specific）
+- **`tools.web.search.provider`**：`brave`、`perplexity` 或 `serper`（可选；不填则按 key 自动选择：perplexity → brave → serper）
+- **`tools.web.search.apiKey`**：通用 key（可选；也兼容写成 `api_key`）
 - **`tools.web.search.brave.apiKey`**：Brave key（可选）
 - **`tools.web.search.perplexity.apiKey`**：Perplexity key（可选）
+- **`tools.web.search.serper.apiKey`**：Serper（google.serper.dev）key（可选；请求头 `X-API-KEY`）
+- **`tools.web.search.proxy`**：可选 HTTP(S) 代理 URL（如 `http://127.0.0.1:7890`）；也可写在 `tools.web.search.<provider>.proxy` 覆盖
 - **`tools.web.search.timeoutSeconds`**：请求超时（默认 10s）
 - **`tools.web.search.cacheTtlMinutes`**：缓存 TTL（默认 5min）
 - **`tools.web.search.maxResults`**：默认结果数（默认 5，上限 10）
+
+API Key 解析优先级（高→低）：
+
+1. `tools.web.search.<provider>.apiKey`（或 `api_key`）
+2. `tools.web.search.apiKey`（或 `api_key`）
+3. 环境变量（见下）
 
 环境变量（provider key）：
 
 - `BRAVE_API_KEY`
 - `PERPLEXITY_API_KEY`
+- `SERPER_API_KEY`
+
+代理（可选，与 `tools.web.search.proxy` 等价之一即可）：`MW4AGENT_WEB_SEARCH_HTTPS_PROXY`、`HTTPS_PROXY`、`HTTP_PROXY`
 
 示例：
 
@@ -231,6 +251,23 @@ run 级开关：
         "enabled": true,
         "provider": "perplexity",
         "perplexity": { "apiKey": "pplx-..." }
+      }
+    }
+  }
+}
+```
+
+Serper 示例：
+
+```json
+{
+  "tools": {
+    "web": {
+      "search": {
+        "enabled": true,
+        "provider": "serper",
+        "proxy": "http://127.0.0.1:7890",
+        "serper": { "apiKey": "YOUR_SERPER_KEY" }
       }
     }
   }

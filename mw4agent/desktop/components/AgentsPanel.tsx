@@ -10,7 +10,9 @@ import {
   readAgentWorkspaceFile,
   resolveAgentDefaults,
   setAgentAvatar,
+  statsAgentsList,
   testLlmConnection,
+  type AgentLlmUsageStats,
   type ListedAgent,
   updateAgentLlm,
   writeAgentWorkspaceFile,
@@ -83,6 +85,7 @@ type AgentsPanelProps = {
 export function AgentsPanel({ onOpenChatWithAgent }: AgentsPanelProps) {
   const { t } = useI18n();
   const [agents, setAgents] = useState<ListedAgent[]>([]);
+  const [statsByAgent, setStatsByAgent] = useState<Record<string, AgentLlmUsageStats | undefined>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -140,14 +143,24 @@ export function AgentsPanel({ onOpenChatWithAgent }: AgentsPanelProps) {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const res = await listAgents();
+    const [res, st] = await Promise.all([listAgents(), statsAgentsList()]);
     setLoading(false);
     if (!res.ok) {
       setError(res.error || t("agentsError"));
       setAgents([]);
+      setStatsByAgent({});
       return;
     }
     setAgents(res.agents);
+    if (st.ok) {
+      const m: Record<string, AgentLlmUsageStats | undefined> = {};
+      for (const row of st.agents) {
+        m[row.agentId] = row.llmUsage ?? undefined;
+      }
+      setStatsByAgent(m);
+    } else {
+      setStatsByAgent({});
+    }
   }, [t]);
 
   useEffect(() => {
@@ -505,6 +518,7 @@ export function AgentsPanel({ onOpenChatWithAgent }: AgentsPanelProps) {
                 <th className="px-3 py-2 font-medium hidden md:table-cell">
                   {t("workspaceDir")}
                 </th>
+                <th className="px-3 py-2 font-medium hidden lg:table-cell">{t("agentsLlmUsage")}</th>
                 <th className="px-3 py-2 font-medium">{t("runStatus")}</th>
                 <th className="px-3 py-2 font-medium w-[1%] whitespace-nowrap">
                   {t("actions")}
@@ -516,6 +530,7 @@ export function AgentsPanel({ onOpenChatWithAgent }: AgentsPanelProps) {
                 const rs = a.runStatus;
                 const state = rs?.state ?? "—";
                 const n = rs?.activeRuns ?? 0;
+                const u = statsByAgent[a.agentId];
                 const avSrc = a.avatar?.trim()
                   ? agentHeaderSrc(a.avatar.trim())
                   : "/icons/robot.png";
@@ -553,6 +568,26 @@ export function AgentsPanel({ onOpenChatWithAgent }: AgentsPanelProps) {
                     </td>
                     <td className="px-3 py-2 text-xs text-[var(--muted)] max-w-xs truncate hidden md:table-cell">
                       {a.workspaceDir || "—"}
+                    </td>
+                    <td className="px-3 py-2 text-[10px] text-[var(--muted)] font-mono hidden lg:table-cell max-w-[14rem]">
+                      {u &&
+                      (u.promptTokensTotal !== undefined ||
+                        u.completionTokensTotal !== undefined ||
+                        u.totalTokensTotal !== undefined) ? (
+                        <span className="block leading-snug" title={t("agentsLlmUsageHint")}>
+                          {t("agentsLlmUsageInOut", {
+                            prompt: String(u.promptTokensTotal ?? "—"),
+                            completion: String(u.completionTokensTotal ?? "—"),
+                          })}
+                          <br />
+                          {t("agentsLlmUsageTotalRuns", {
+                            total: String(u.totalTokensTotal ?? "—"),
+                            runs: String(u.numRequests ?? "—"),
+                          })}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td className="px-3 py-2 text-xs">
                       <span className="text-[var(--text)]">{state}</span>

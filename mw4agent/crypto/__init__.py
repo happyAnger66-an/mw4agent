@@ -11,7 +11,13 @@ from .secure_io import (
     EncryptionConfigError,
     EncryptedFileStore,
     get_default_encrypted_store,
+    is_encryption_enabled,
 )
 
-__all__ = ["EncryptionConfigError", "EncryptedFileStore", "get_default_encrypted_store"]
+__all__ = [
+    "EncryptionConfigError",
+    "EncryptedFileStore",
+    "get_default_encrypted_store",
+    "is_encryption_enabled",
+]
 

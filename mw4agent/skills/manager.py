@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..crypto import EncryptionConfigError, get_default_encrypted_store
+from ..crypto import EncryptionConfigError, get_default_encrypted_store, is_encryption_enabled
 
 from .format_md import parse_skill_markdown
 
@@ -85,21 +85,24 @@ class SkillManager:
         path, fmt = resolved
 
         if fmt == "json":
-            try:
-                store = get_default_encrypted_store()
-                data = store.read_json(str(path), fallback_plaintext=True)
-                if isinstance(data, dict):
-                    return data
-                return None
-            except EncryptionConfigError as e:
-                print(f"Warning: Encryption not configured, falling back to plaintext: {e}")
+            if is_encryption_enabled():
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        return data if isinstance(data, dict) else None
-                except Exception as e2:
-                    print(f"Warning: Failed to load plaintext skill: {e2}")
+                    store = get_default_encrypted_store()
+                    data = store.read_json(str(path), fallback_plaintext=True)
+                    if isinstance(data, dict):
+                        return data
                     return None
+                except EncryptionConfigError as e:
+                    print(f"Warning: Encryption not configured, falling back to plaintext: {e}")
+                except Exception as e:
+                    print(f"Warning: Failed to load skill (encrypted path): {e}")
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data if isinstance(data, dict) else None
+            except Exception as e2:
+                print(f"Warning: Failed to load plaintext skill: {e2}")
+                return None
         else:
             try:
                 text = path.read_text(encoding="utf-8")
@@ -119,13 +122,17 @@ class SkillManager:
             data: Skill dictionary to write.
         """
         path = self._get_skill_path(name)
-        try:
-            store = get_default_encrypted_store()
-            store.write_json(str(path), data)
-        except EncryptionConfigError:
-            print("Warning: Encryption not configured, writing plaintext skill")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+        if is_encryption_enabled():
+            try:
+                store = get_default_encrypted_store()
+                store.write_json(str(path), data)
+                return
+            except EncryptionConfigError as e:
+                print(f"Warning: Encryption not configured, writing plaintext skill: {e}")
+            except Exception as e:
+                print(f"Warning: Failed to write skill (encrypted path): {e}")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
 
     def delete_skill(self, name: str) -> bool:
         """Delete a skill file (JSON, .md, or <name>/SKILL.md).

@@ -13,9 +13,10 @@ import json
 import os
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from ..agents.types import AgentRunParams
+if TYPE_CHECKING:
+    from ..agents.types import AgentRunParams
 from ..config import get_default_config_manager
 from mw4agent.log import get_logger
 from mw4agent.log.agent_llm import format_agent_tag, preview_one_line
@@ -96,6 +97,19 @@ def _first_non_empty_str(*candidates: Optional[Any]) -> str:
             return s
     return ""
 
+def _first_positive_int(*candidates: Optional[Any]) -> Optional[int]:
+    for c in candidates:
+        if c is None:
+            continue
+        try:
+            # Accept strings and numbers.
+            n = int(str(c).strip())
+        except Exception:
+            continue
+        if n > 0:
+            return n
+    return None
+
 
 def _as_text(value: Any) -> str:
     if value is None:
@@ -103,6 +117,84 @@ def _as_text(value: Any) -> str:
     if isinstance(value, str):
         return value
     return str(value)
+
+def _estimate_message_tokens(msg: Dict[str, Any]) -> int:
+    """Rough token estimate without external deps.
+
+    Heuristic: ~4 chars per token + small overhead per message.
+    This is intentionally conservative and only used for trimming decisions.
+    """
+    role = str(msg.get("role") or "")
+    content = msg.get("content")
+    if isinstance(content, str):
+        txt = content
+    else:
+        # For multimodal / list content variants, fall back to stringified length.
+        txt = _as_text(content)
+    chars = len(txt)
+    # Minimum overhead: role + JSON-ish structure.
+    overhead = 8 + len(role)
+    return max(1, (chars // 4) + overhead)
+
+
+def _estimate_messages_tokens(messages: List[Dict[str, Any]]) -> int:
+    return sum(_estimate_message_tokens(m) for m in messages if isinstance(m, dict))
+
+
+def _truncate_messages_for_context_window(
+    messages: List[Dict[str, Any]],
+    *,
+    context_window: int,
+    max_tokens: Optional[int],
+    agent_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Trim messages to fit within context_window (approx).
+
+    Policy:
+    - Preserve all system messages.
+    - Preserve the most recent non-system messages.
+    - Budget leaves room for max_tokens (completion) plus a small safety margin.
+    """
+    if not isinstance(context_window, int) or context_window <= 0:
+        return messages
+    completion_budget = int(max_tokens or 0)
+    safety = 64
+    prompt_budget = context_window - completion_budget - safety
+    if prompt_budget <= 0:
+        return messages
+
+    sys_msgs: List[Dict[str, Any]] = [m for m in messages if isinstance(m, dict) and str(m.get("role") or "") == "system"]
+    other_msgs: List[Dict[str, Any]] = [m for m in messages if isinstance(m, dict) and str(m.get("role") or "") != "system"]
+
+    kept_other: List[Dict[str, Any]] = []
+    # Keep from the end until we fit.
+    running = _estimate_messages_tokens(sys_msgs)
+    for m in reversed(other_msgs):
+        mt = _estimate_message_tokens(m)
+        if kept_other and running + mt > prompt_budget:
+            break
+        if not kept_other and running + mt > prompt_budget:
+            # Always keep the last message even if it exceeds budget.
+            kept_other.append(m)
+            running += mt
+            break
+        kept_other.append(m)
+        running += mt
+        if running >= prompt_budget:
+            break
+
+    out = sys_msgs + list(reversed(kept_other))
+    if len(out) < len(messages):
+        tag = format_agent_tag(agent_id)
+        logger.info(
+            "%s llm prompt trimmed messages=%d->%d est_tokens=%d budget=%d",
+            tag,
+            len(messages),
+            len(out),
+            _estimate_messages_tokens(out),
+            prompt_budget,
+        )
+    return out
 
 
 def _extract_text_and_reasoning_from_message(
@@ -194,6 +286,40 @@ def _normalize_thinking_level(raw: Optional[Any]) -> str:
     if s in ("minimal", "low", "medium", "high", "xhigh", "adaptive"):
         return s
     return "off"
+
+def _resolve_llm_limits(params: AgentRunParams) -> Tuple[Optional[int], Optional[int]]:
+    """Resolve context_window and max_tokens for this run (best-effort).
+
+    Precedence per field (first set wins):
+    agent.json ``llm`` → global ``llm`` → environment (MW4AGENT_LLM_*).
+    """
+    g = _load_llm_config()
+    if not isinstance(g, dict):
+        g = {}
+    a = _load_agent_llm_overrides(params.agent_id)
+
+    context_window = _first_positive_int(
+        a.get("contextWindow"),
+        a.get("context_window"),
+        g.get("contextWindow"),
+        g.get("context_window"),
+        os.getenv("MW4AGENT_LLM_CONTEXT_WINDOW"),
+    )
+    max_tokens = _first_positive_int(
+        a.get("maxTokens"),
+        a.get("max_tokens"),
+        g.get("maxTokens"),
+        g.get("max_tokens"),
+        os.getenv("MW4AGENT_LLM_MAX_TOKENS"),
+    )
+    return context_window, max_tokens
+
+
+def _limits_extra_body(max_tokens: Optional[int]) -> Dict[str, Any]:
+    if not max_tokens:
+        return {}
+    # OpenAI-compatible "chat/completions" commonly accepts max_tokens.
+    return {"max_tokens": int(max_tokens)}
 
 
 def _resolve_reasoning_effort_for_provider(provider: str, thinking_level: str) -> Optional[str]:
@@ -401,6 +527,9 @@ def _call_openai_chat_with_tools(
         "model": model,
         "messages": messages,
         "tools": tools,
+        # Some OpenAI-compatible gateways won't emit tool_calls unless tool_choice is present.
+        # Defaulting to "auto" keeps behavior aligned with OpenAI and preserves model autonomy.
+        "tool_choice": "auto",
         "temperature": 0.2,
     }
     if isinstance(extra_body, dict) and extra_body:
@@ -483,6 +612,7 @@ def generate_reply_with_tools(
     When provider is echo or tools unsupported, returns (reply_text, [], provider, model, usage).
     """
     provider, model, cfg_base_url, cfg_api_key, thinking_level = _resolve_llm_settings(params)
+    context_window, max_tokens = _resolve_llm_limits(params)
 
     if provider in ("", "echo", "debug"):
         default_model = "gpt-4o-mini"
@@ -507,24 +637,46 @@ def generate_reply_with_tools(
 
     tools_openai = _tools_to_openai_format(tool_definitions)
     if not tools_openai:
+        # Build messages so we can apply prompt trimming.
+        resolved_messages: List[Dict[str, Any]] = [{"role": "user", "content": params.message}]
+        if params.extra_system_prompt and str(params.extra_system_prompt).strip():
+            resolved_messages = [{"role": "system", "content": str(params.extra_system_prompt).strip()}] + resolved_messages
+        if context_window:
+            resolved_messages = _truncate_messages_for_context_window(
+                resolved_messages,
+                context_window=context_window,
+                max_tokens=max_tokens,
+                agent_id=params.agent_id,
+            )
         reply, usage = _call_openai_chat(
             params.message,
+            messages=resolved_messages,
             model=model or spec.default_model or "gpt-4o-mini",
             api_key=api_key or "none",
             base_url=base_url,
-            extra_body=_thinking_extra_body(provider, thinking_level),
+            extra_body={**_thinking_extra_body(provider, thinking_level), **_limits_extra_body(max_tokens)},
             agent_id=params.agent_id,
         )
         return reply, [], provider, model or spec.default_model, usage
 
     try:
+        resolved_messages = messages
+        if params.extra_system_prompt and str(params.extra_system_prompt).strip():
+            resolved_messages = [{"role": "system", "content": str(params.extra_system_prompt).strip()}] + resolved_messages
+        if context_window:
+            resolved_messages = _truncate_messages_for_context_window(
+                resolved_messages,
+                context_window=context_window,
+                max_tokens=max_tokens,
+                agent_id=params.agent_id,
+            )
         content, tool_calls, usage = _call_openai_chat_with_tools(
-            messages,
+            resolved_messages,
             tools_openai,
             model=model or spec.default_model or "gpt-4o-mini",
             api_key=api_key or "none",
             base_url=base_url,
-            extra_body=_thinking_extra_body(provider, thinking_level),
+            extra_body={**_thinking_extra_body(provider, thinking_level), **_limits_extra_body(max_tokens)},
             agent_id=params.agent_id,
         )
         return content, tool_calls, provider, model or spec.default_model, usage
@@ -540,6 +692,7 @@ def generate_reply(params: AgentRunParams, *, messages: Optional[List[Dict[str, 
         reply_text, provider, model, usage
     """
     provider, model, cfg_base_url, cfg_api_key, thinking_level = _resolve_llm_settings(params)
+    context_window, max_tokens = _resolve_llm_limits(params)
 
     # Echo backend (default, local only)
     if provider in ("", "echo", "debug"):
@@ -569,18 +722,30 @@ def generate_reply(params: AgentRunParams, *, messages: Optional[List[Dict[str, 
         reply = f"Agent (echo:no-api-key:{provider}) reply: {params.message}"
         return reply, "echo", model, LLMUsage()
 
-    prompt = params.message
-    if params.extra_system_prompt:
-        prompt = params.extra_system_prompt.strip() + "\n\n" + prompt
+    # Prefer messages-based prompt handling so we can trim to context windows.
+    resolved_messages: List[Dict[str, Any]]
+    if messages and isinstance(messages, list) and len(messages) > 0:
+        resolved_messages = list(messages)
+    else:
+        resolved_messages = [{"role": "user", "content": params.message}]
+    if params.extra_system_prompt and str(params.extra_system_prompt).strip():
+        resolved_messages = [{"role": "system", "content": str(params.extra_system_prompt).strip()}] + resolved_messages
+    if context_window:
+        resolved_messages = _truncate_messages_for_context_window(
+            resolved_messages,
+            context_window=context_window,
+            max_tokens=max_tokens,
+            agent_id=params.agent_id,
+        )
 
     try:
         text, usage = _call_openai_chat(
-            prompt,
-            messages=messages,
+            params.message,
+            messages=resolved_messages,
             model=model or spec.default_model or "gpt-4o-mini",
             api_key=api_key or "none",
             base_url=base_url,
-            extra_body=_thinking_extra_body(provider, thinking_level),
+            extra_body={**_thinking_extra_body(provider, thinking_level), **_limits_extra_body(max_tokens)},
             agent_id=params.agent_id,
         )
         return text or "", provider, model or spec.default_model, usage
@@ -666,3 +831,20 @@ def test_llm_connection(llm: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 def list_providers() -> Tuple[str, ...]:
     """Return registered OpenAI-compatible provider ids (excluding echo)."""
     return tuple(_OPENAI_COMPAT_SPECS.keys())
+
+
+def list_provider_infos() -> List[Dict[str, Any]]:
+    """Return provider metadata for UI/config helpers (safe, non-secret)."""
+    out: List[Dict[str, Any]] = []
+    for pid, spec in sorted(_OPENAI_COMPAT_SPECS.items(), key=lambda x: x[0]):
+        out.append(
+            {
+                "id": pid,
+                "default_base_url": spec.default_base_url,
+                "default_model": spec.default_model,
+                "api_key_env": spec.api_key_env,
+                "require_api_key": bool(spec.require_api_key),
+                "base_url_required": bool(spec.base_url_required),
+            }
+        )
+    return out

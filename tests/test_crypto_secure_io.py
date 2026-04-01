@@ -86,7 +86,7 @@ def test_load_key_from_env_and_default_store(monkeypatch) -> None:
     """`_load_key_from_env` and `get_default_encrypted_store` obey env contract."""
     env_key = _random_key_b64(32)
     monkeypatch.setenv("MW4AGENT_SECRET_KEY", env_key)
-    monkeypatch.delenv("MW4AGENT_IS_ENC", raising=False)  # 确保加密开启，不受外部环境影响
+    monkeypatch.setenv("MW4AGENT_IS_ENC", "1")  # 确保加密开启，不受外部环境影响
     import mw4agent.crypto.secure_io as secure_io_mod
     secure_io_mod._default_store = None  # type: ignore[attr-defined]
 
@@ -111,19 +111,19 @@ def test_load_key_from_env_missing_raises(monkeypatch) -> None:
 
 def test_is_encryption_enabled_switch(monkeypatch) -> None:
     """MW4AGENT_IS_ENC controls encryption enable/disable with sensible defaults."""
-    # 默认：未设置或为空 → 启用
+    # 默认：未设置或为空 → 关闭
     monkeypatch.delenv("MW4AGENT_IS_ENC", raising=False)
-    assert is_encryption_enabled() is True
+    assert is_encryption_enabled() is False
     monkeypatch.setenv("MW4AGENT_IS_ENC", "")
-    assert is_encryption_enabled() is True
+    assert is_encryption_enabled() is False
 
-    # 显式关闭
-    for val in ("0", "false", "False", "OFF", "no", "No"):
+    # 显式关闭（以及其他未知值）都视为关闭
+    for val in ("0", "false", "False", "OFF", "no", "No", "random"):
         monkeypatch.setenv("MW4AGENT_IS_ENC", val)
         assert is_encryption_enabled() is False
 
-    # 其他值都视为开启
-    for val in ("1", "true", "yes", "on", "random"):
+    # 显式开启
+    for val in ("1", "true", "True", "yes", "Yes", "on", "ON"):
         monkeypatch.setenv("MW4AGENT_IS_ENC", val)
         assert is_encryption_enabled() is True
 

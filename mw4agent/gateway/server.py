@@ -834,6 +834,59 @@ def create_app(
                 )
             return {"id": req_id, "ok": True, "payload": {"agents": items}}
 
+        if method == "stats.agent.get":
+            raw_aid = params.get("agentId", params.get("agent_id"))
+            agent_id = str(raw_aid or "").strip()
+            if not agent_id:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "invalid_request", "message": "agentId required"},
+                }
+            try:
+                from ..agents.stats.agent_usage import get_agent_stats_path, load_agent_stats
+                from ..config.paths import normalize_agent_id
+
+                aid = normalize_agent_id(agent_id)
+                stats = load_agent_stats(aid)
+                path = str(get_agent_stats_path(aid))
+            except Exception as e:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "unavailable", "message": f"stats.agent.get failed: {e}"},
+                }
+            return {
+                "id": req_id,
+                "ok": True,
+                "payload": {"agentId": aid, "path": path, "stats": stats},
+            }
+
+        if method == "stats.agents.list":
+            try:
+                from ..agents.stats.agent_usage import get_agent_stats_path, load_agent_stats
+                from ..config.paths import normalize_agent_id
+
+                rows: List[Dict[str, Any]] = []
+                for raw_id in agent_manager.list_agents():
+                    aid = normalize_agent_id(raw_id)
+                    st = load_agent_stats(aid)
+                    rows.append(
+                        {
+                            "agentId": aid,
+                            "path": str(get_agent_stats_path(aid)),
+                            "llmUsage": st.get("llmUsage"),
+                            "updatedAtMs": st.get("updatedAtMs"),
+                        }
+                    )
+            except Exception as e:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "unavailable", "message": f"stats.agents.list failed: {e}"},
+                }
+            return {"id": req_id, "ok": True, "payload": {"agents": rows}}
+
         if method == "agents.resolve_defaults":
             try:
                 from ..config.paths import (
@@ -1437,7 +1490,7 @@ def create_app(
 
         if method == "llm.providers.list":
             try:
-                from ..llm.backends import list_providers
+                from ..llm.backends import list_providers, list_provider_infos
             except Exception as e:
                 return {
                     "id": req_id,
@@ -1445,7 +1498,12 @@ def create_app(
                     "error": {"code": "unavailable", "message": str(e)},
                 }
             provs = ["echo", *list(list_providers())]
-            return {"id": req_id, "ok": True, "payload": {"providers": provs}}
+            infos = [{"id": "echo", "default_base_url": None, "default_model": "gpt-4o-mini"}]
+            try:
+                infos.extend(list_provider_infos())
+            except Exception:
+                pass
+            return {"id": req_id, "ok": True, "payload": {"providers": provs, "providerInfos": infos}}
 
         if method == "llm.test":
             try:

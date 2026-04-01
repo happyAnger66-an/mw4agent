@@ -128,3 +128,69 @@ def test_qwen_tool_calls_with_reasoning_content_payload(monkeypatch) -> None:
     assert tool_calls[0]["arguments"] == {"command": "echo ok"}
     assert usage.total_tokens == 13
 
+
+def test_llm_max_tokens_and_context_window_from_config(monkeypatch, tmp_path: Path) -> None:
+    """maxTokens should be passed to the API and contextWindow should trim old messages."""
+    import json
+
+    # Isolate config directory
+    cfg_dir = tmp_path / "config"
+    monkeypatch.setenv("MW4AGENT_CONFIG_DIR", str(cfg_dir))
+    monkeypatch.setenv("MW4AGENT_STATE_DIR", str(tmp_path / "mw_state"))
+    import mw4agent.config.manager as cfg_mod
+
+    cfg_mod._default_config_manager = None  # type: ignore[attr-defined]
+    mgr: ConfigManager = get_default_config_manager()
+    mgr.write_config(
+        "llm",
+        {
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "base_url": "https://example.com",
+            "api_key": "sk-test",
+            "contextWindow": 200,
+            "maxTokens": 30,
+        },
+    )
+
+    captured: dict = {}
+    payload = {
+        "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    def _fake_urlopen(req, timeout=30.0):
+        body = json.loads((req.data or b"{}").decode("utf-8"))
+        captured["body"] = body
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+
+    # Provide a long history; trimming should keep only the tail.
+    msgs = [{"role": "system", "content": "SYS"}]
+    for i in range(30):
+        msgs.append({"role": "user", "content": "x" * 80 + f" #{i}"})
+        msgs.append({"role": "assistant", "content": "y" * 80 + f" #{i}"})
+
+    _text, provider, model, _usage = generate_reply(AgentRunParams(message="hi"), messages=msgs)
+    assert provider == "openai"
+    assert model == "gpt-4o-mini"
+
+    sent = captured.get("body") or {}
+    assert sent.get("max_tokens") == 30
+    assert isinstance(sent.get("messages"), list)
+    # Must keep system message and at least the last user/assistant messages.
+    assert sent["messages"][0]["role"] == "system"
+    assert sent["messages"][-1]["role"] in ("user", "assistant")
+    assert len(sent["messages"]) < len(msgs)
+

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import time
 
-from ...crypto import get_default_encrypted_store, EncryptionConfigError  # type: ignore[attr-defined]
+from ...crypto import EncryptionConfigError, get_default_encrypted_store, is_encryption_enabled  # type: ignore[attr-defined]
 from .transcript import validate_session_id
 
 
@@ -80,20 +80,24 @@ class SessionManager:
         """Load sessions from file (encrypted first, fallback to plaintext)."""
         if not self.session_file.exists():
             return
-        try:
-            store = get_default_encrypted_store()
-            data = store.read_json(str(self.session_file), fallback_plaintext=True)
-        except EncryptionConfigError:
-            # 未配置密钥时，退化为明文 JSON 读取（开发/测试场景）
+        data = None
+        if is_encryption_enabled():
+            try:
+                store = get_default_encrypted_store()
+                data = store.read_json(str(self.session_file), fallback_plaintext=True)
+            except EncryptionConfigError as e:
+                # Encryption explicitly enabled but misconfigured; fall back.
+                print(f"Warning: Encryption not configured, falling back to plaintext: {e}")
+            except Exception as e:
+                print(f"Warning: Failed to load sessions (encrypted path): {e}")
+                return
+        if data is None:
             try:
                 with open(self.session_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
             except Exception as e:  # pragma: no cover - 容错路径
                 print(f"Warning: Failed to load sessions (plaintext fallback): {e}")
                 return
-        except Exception as e:
-            print(f"Warning: Failed to load sessions (encrypted): {e}")
-            return
 
         if isinstance(data, dict) and "sessions" in data:
             for session_data in data["sessions"]:
@@ -110,13 +114,17 @@ class SessionManager:
             payload = {
                 "sessions": [asdict(entry) for entry in self.sessions.values()],
             }
-            try:
-                store = get_default_encrypted_store()
-                store.write_json(str(self.session_file), payload)
-            except EncryptionConfigError:
-                # 无密钥时，退化为原始明文 JSON 写入（开发/测试模式）
-                with open(self.session_file, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, indent=2, ensure_ascii=False)
+            if is_encryption_enabled():
+                try:
+                    store = get_default_encrypted_store()
+                    store.write_json(str(self.session_file), payload)
+                    return
+                except EncryptionConfigError as e:
+                    print(f"Warning: Encryption not configured, writing plaintext sessions: {e}")
+                except Exception as e:
+                    print(f"Warning: Failed to save sessions (encrypted path): {e}")
+            with open(self.session_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"Warning: Failed to save sessions: {e}")
 

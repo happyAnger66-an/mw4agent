@@ -7,6 +7,7 @@ from .read_tool import ReadTool
 from .write_tool import WriteTool
 from .memory_tool import MemorySearchTool, MemoryGetTool, MemoryWriteTool
 from .web_search_tool import WebSearchTool
+from .web_fetch_tool import WebFetchTool
 from .exec_tool import ExecTool
 from .process_tool import ProcessTool
 
@@ -20,6 +21,7 @@ def _register_builtin_tools() -> None:
         MemoryGetTool(),
         MemoryWriteTool(),
         WebSearchTool(),
+        WebFetchTool(),
         ExecTool(),
         ProcessTool(),
     ):
@@ -41,6 +43,7 @@ __all__ = [
     "MemoryGetTool",
     "MemoryWriteTool",
     "WebSearchTool",
+    "WebFetchTool",
     "ExecTool",
     "ProcessTool",
 ]

@@ -29,7 +29,7 @@ def secret_key(monkeypatch) -> str:
     """Set up a test secret key and ensure encryption is enabled."""
     key = base64.b64encode(os.urandom(32)).decode("ascii")
     monkeypatch.setenv("MW4AGENT_SECRET_KEY", key)
-    monkeypatch.delenv("MW4AGENT_IS_ENC", raising=False)  # 确保加密开启，不受外部环境影响
+    monkeypatch.setenv("MW4AGENT_IS_ENC", "1")  # 确保加密开启，不受外部环境影响
     return key
 
 

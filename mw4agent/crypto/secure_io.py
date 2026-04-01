@@ -42,16 +42,16 @@ class EncryptionConfigError(RuntimeError):
 def is_encryption_enabled(env_var: str = "MW4AGENT_IS_ENC") -> bool:
     """Check whether encryption is enabled via env switch.
 
-    - 默认开启：未设置或为空时视为开启；
-    - 显式关闭：当值为 "0" / "false" / "off" / "no"（忽略大小写）时关闭。
+    - 默认关闭：未设置或为空时视为关闭；
+    - 显式开启：当值为 "1" / "true" / "on" / "yes"（忽略大小写）时开启。
     """
     raw = os.getenv(env_var)
     if raw is None:
-        return True
-    value = raw.strip().lower()
-    if value in ("0", "false", "off", "no"):
         return False
-    return True
+    value = raw.strip().lower()
+    if not value:
+        return False
+    return value in ("1", "true", "on", "yes")
 
 def _load_key_from_env(env_var: str = "MW4AGENT_SECRET_KEY") -> bytes:
     """Load symmetric key from env (base64 或原始 32 字节 hex/raw).

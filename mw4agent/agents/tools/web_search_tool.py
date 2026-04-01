@@ -3,9 +3,11 @@
 Currently implemented providers:
 - Brave Search API (https://api.search.brave.com/res/v1/web/search)
 - Perplexity Search API (https://api.perplexity.ai/search)
+- Serper Google Search API (https://google.serper.dev/search)
 
 Design notes:
 - Requires API key (config or env).
+- Optional HTTP(S) proxy via `tools.web.search.proxy` / per-provider `proxy` or env.
 - Wraps external content with a clear untrusted boundary.
 - Uses an in-memory cache with TTL to avoid repeated external calls.
 """
@@ -26,10 +28,40 @@ from .base import AgentTool, ToolResult
 
 BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 PERPLEXITY_SEARCH_ENDPOINT = "https://api.perplexity.ai/search"
+SERPER_SEARCH_ENDPOINT = "https://google.serper.dev/search"
 DEFAULT_COUNT = 5
 MAX_COUNT = 10
 DEFAULT_TIMEOUT_S = 10
 DEFAULT_CACHE_TTL_S = 5 * 60
+
+
+def _urlopen(req: urllib.request.Request, *, timeout: float, proxy: Optional[str] = None):
+    """Open URL with optional HTTP(S) proxy (same shape for all providers)."""
+    if proxy:
+        handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        opener = urllib.request.build_opener(handler)
+        return opener.open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def _resolve_proxy(cfg: Dict[str, Any], provider: str) -> Optional[str]:
+    """HTTPS proxy URL for web_search, e.g. http://127.0.0.1:7890."""
+    p = (provider or "").strip().lower()
+    if p:
+        sub = cfg.get(p)
+        if isinstance(sub, dict):
+            raw = sub.get("proxy") or sub.get("httpsProxy") or sub.get("https_proxy")
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    for key in ("proxy", "httpsProxy", "https_proxy"):
+        raw = cfg.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    for env in ("MW4AGENT_WEB_SEARCH_HTTPS_PROXY", "HTTPS_PROXY", "HTTP_PROXY"):
+        v = os.getenv(env, "").strip()
+        if v:
+            return v
+    return None
 
 
 def _now_ms() -> int:
@@ -169,12 +201,15 @@ def _resolve_provider_api_key(cfg: Dict[str, Any], provider: str) -> Optional[st
     if p == "perplexity":
         env = os.getenv("PERPLEXITY_API_KEY", "").strip()
         return env or None
+    if p == "serper":
+        env = os.getenv("SERPER_API_KEY", "").strip()
+        return env or None
     return None
 
 
 def _auto_select_provider(cfg: Dict[str, Any]) -> Optional[str]:
     # Keep this simple and deterministic for now.
-    for p in ("perplexity", "brave"):
+    for p in ("perplexity", "brave", "serper"):
         if _resolve_provider_api_key(cfg, p):
             return p
     return None
@@ -213,6 +248,7 @@ def _brave_search(
     ui_lang: Optional[str],
     freshness: Optional[str],
     timeout_s: int,
+    proxy: Optional[str] = None,
 ) -> Dict[str, Any]:
     url = BRAVE_SEARCH_ENDPOINT + "?" + urllib.parse.urlencode(
         {
@@ -229,7 +265,7 @@ def _brave_search(
         method="GET",
         headers={"Accept": "application/json", "X-Subscription-Token": api_key},
     )
-    with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp:
+    with _urlopen(req, timeout=float(timeout_s), proxy=proxy) as resp:
         raw = resp.read().decode("utf-8", errors="replace")
     data = json.loads(raw) if raw else {}
     results = []
@@ -271,6 +307,7 @@ def _perplexity_search(
     date_after: Optional[str],
     date_before: Optional[str],
     timeout_s: int,
+    proxy: Optional[str] = None,
 ) -> Dict[str, Any]:
     # Perplexity Search API is "answer + citations" shaped; keep output compatible.
     # Best-effort filters: Perplexity supports "recency" and date range in some modes;
@@ -301,7 +338,7 @@ def _perplexity_search(
             "Authorization": f"Bearer {api_key}",
         },
     )
-    with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp:
+    with _urlopen(req, timeout=float(timeout_s), proxy=proxy) as resp:
         raw = resp.read().decode("utf-8", errors="replace")
     data = json.loads(raw) if raw else {}
 
@@ -351,12 +388,75 @@ def _perplexity_search(
     }
 
 
+def _serper_search(
+    *,
+    api_key: str,
+    query: str,
+    count: int,
+    gl: Optional[str],
+    hl: Optional[str],
+    page: Optional[int],
+    timeout_s: int,
+    proxy: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Serper.dev Google Search API (POST JSON, header X-API-KEY)."""
+    body: Dict[str, Any] = {
+        "q": query,
+        "num": min(max(count, 1), 100),
+    }
+    if gl:
+        body["gl"] = gl
+    if hl:
+        body["hl"] = hl
+    if page is not None and page > 0:
+        body["page"] = page
+
+    data_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url=SERPER_SEARCH_ENDPOINT,
+        method="POST",
+        data=data_bytes,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-API-KEY": api_key,
+        },
+    )
+    with _urlopen(req, timeout=float(timeout_s), proxy=proxy) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+    data = json.loads(raw) if raw else {}
+    results: list[Dict[str, Any]] = []
+    organic = data.get("organic") if isinstance(data, dict) else None
+    if isinstance(organic, list):
+        for item in organic:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "")
+            url0 = str(item.get("link") or item.get("url") or "")
+            snippet = str(item.get("snippet") or "")
+            results.append(
+                {
+                    "title": _wrap_untrusted(title) if title else "",
+                    "url": url0,
+                    "description": _wrap_untrusted(snippet) if snippet else "",
+                    "published": None,
+                }
+            )
+    return {
+        "query": query,
+        "provider": "serper",
+        "count": len(results),
+        "results": results,
+        "externalContent": {"untrusted": True, "source": "web_search", "provider": "serper", "wrapped": True},
+    }
+
+
 class WebSearchTool(AgentTool):
     def __init__(self) -> None:
         super().__init__(
             name="web_search",
             description=(
-                "Search the web. Supports multiple providers (brave, perplexity). "
+                "Search the web. Supports multiple providers (brave, perplexity, serper). "
                 "Requires provider API key via env or tools.web.search config."
             ),
             parameters={
@@ -372,6 +472,10 @@ class WebSearchTool(AgentTool):
                     # Brave-specific (kept for compatibility with existing callers).
                     "search_lang": {"type": "string", "description": "Brave: search language code, e.g. en, zh-hans."},
                     "ui_lang": {"type": "string", "description": "Brave: UI language locale, e.g. en-US."},
+                    # Serper-specific (optional; also mapped from country/language when omitted).
+                    "gl": {"type": "string", "description": "Serper: country/geo for results, e.g. cn, us."},
+                    "hl": {"type": "string", "description": "Serper: interface/language, e.g. zh-cn, en."},
+                    "page": {"type": "integer", "description": "Serper: results page (1-based)."},
                 },
                 "required": ["query"],
             },
@@ -389,18 +493,19 @@ class WebSearchTool(AgentTool):
             return ToolResult(success=False, result={"error": "disabled"}, error="web_search is disabled")
 
         provider = _resolve_provider(cfg) or _auto_select_provider(cfg)
-        if provider not in ("brave", "perplexity"):
+        if provider not in ("brave", "perplexity", "serper"):
             return ToolResult(
                 success=True,
                 result={
                     "error": "missing_web_search_provider",
-                    "message": "web_search needs tools.web.search.provider or a supported API key (BRAVE_API_KEY / PERPLEXITY_API_KEY).",
-                    "supportedProviders": ["brave", "perplexity"],
+                    "message": "web_search needs tools.web.search.provider or a supported API key (BRAVE_API_KEY / PERPLEXITY_API_KEY / SERPER_API_KEY).",
+                    "supportedProviders": ["brave", "perplexity", "serper"],
                 },
             )
         api_key = _resolve_provider_api_key(cfg, provider)
         if not api_key:
-            env_hint = "BRAVE_API_KEY" if provider == "brave" else "PERPLEXITY_API_KEY"
+            env_map = {"brave": "BRAVE_API_KEY", "perplexity": "PERPLEXITY_API_KEY", "serper": "SERPER_API_KEY"}
+            env_hint = env_map.get(provider, "tools.web.search.<provider>.apiKey")
             return ToolResult(
                 success=True,
                 result={
@@ -427,6 +532,17 @@ class WebSearchTool(AgentTool):
         # Brave-specific
         search_lang = _read_str(params, "search_lang")
         ui_lang = _read_str(params, "ui_lang")
+        # Serper-specific
+        gl_param = _read_str(params, "gl")
+        hl_param = _read_str(params, "hl")
+        page_param = _read_int(params, "page")
+        gl = gl_param or (
+            country.strip().lower()
+            if country and country.strip().upper() != "ALL"
+            else None
+        )
+        hl = hl_param or language
+        proxy = _resolve_proxy(cfg, provider)
 
         timeout_s = _resolve_timeout_s(cfg, context)
         ttl_s = _resolve_cache_ttl_s(cfg)
@@ -442,6 +558,10 @@ class WebSearchTool(AgentTool):
                 "date_before": date_before or "",
                 "search_lang": search_lang or "",
                 "ui_lang": ui_lang or "",
+                "gl": gl or "",
+                "hl": hl or "",
+                "page": page_param or 0,
+                "proxy": proxy or "",
             },
         )
         now = _now_ms()
@@ -463,6 +583,18 @@ class WebSearchTool(AgentTool):
                     date_after=date_after,
                     date_before=date_before,
                     timeout_s=timeout_s,
+                    proxy=proxy,
+                )
+            elif provider == "serper":
+                payload = _serper_search(
+                    api_key=api_key,
+                    query=query,
+                    count=count,
+                    gl=gl,
+                    hl=hl,
+                    page=page_param,
+                    timeout_s=timeout_s,
+                    proxy=proxy,
                 )
             else:
                 payload = _brave_search(
@@ -474,6 +606,7 @@ class WebSearchTool(AgentTool):
                     ui_lang=ui_lang,
                     freshness=freshness,
                     timeout_s=timeout_s,
+                    proxy=proxy,
                 )
             payload["tookMs"] = 0  # best-effort; keep shape similar
             payload["cache"] = {"hit": False, "ttlSeconds": ttl_s}

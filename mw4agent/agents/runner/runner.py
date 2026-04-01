@@ -43,6 +43,7 @@ from ...config.paths import resolve_agent_workspace_dir
 from ...llm import generate_reply, generate_reply_with_tools, LLMUsage
 from ..reasoning import split_reasoning_and_text
 from ..skills.snapshot import build_skill_snapshot
+from ..stats.agent_usage import apply_llm_usage
 
 from mw4agent.log import get_logger
 logger = get_logger(__name__)
@@ -61,6 +62,7 @@ from ..session.transcript import (
     split_by_user_turns,
 )
 from ..tools.web_search_tool import is_web_search_enabled
+from ..tools.web_fetch_tool import is_web_fetch_enabled
 
 MAX_TOOL_ROUNDS = 30
 TOOL_PROCESSING_START_SEC = 30.0
@@ -655,6 +657,9 @@ class AgentRunner:
             # Do not expose web_search unless explicitly enabled (avoids unexpected external calls).
             if not is_web_search_enabled():
                 tools_after_policy = [t for t in tools_after_policy if t.name != "web_search"]
+            # Do not expose web_fetch unless explicitly enabled (avoids unexpected external calls).
+            if not is_web_fetch_enabled():
+                tools_after_policy = [t for t in tools_after_policy if t.name != "web_fetch"]
             # Sandbox tool policy (optional) sits on top of normal policy.
             tools_after_policy = filter_tools_by_sandbox_policy(tools_after_policy, sandbox_policy)
 
@@ -788,6 +793,10 @@ class AgentRunner:
                 usage_dict["output"] = int(usage.output_tokens)
             if usage.total_tokens is not None:
                 usage_dict["total"] = int(usage.total_tokens)
+            try:
+                apply_llm_usage(params.agent_id, usage, provider or "", model or "")
+            except Exception:
+                logger.debug("apply_llm_usage failed", exc_info=True)
 
         payload = AgentPayload(text=text_only)
 
