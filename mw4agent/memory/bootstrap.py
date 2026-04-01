@@ -12,6 +12,42 @@ from .search import BOOTSTRAP_ORDER_FOR_PROMPT
 DEFAULT_MAX_CHARS_PER_FILE = 20_000
 DEFAULT_TOTAL_MAX_CHARS = 150_000
 
+# Identity / docs only (orchestration runs read MEMORY from ``orch_workspace_dir``).
+BOOTSTRAP_IDENTITY_FILES_FOR_ORCH = (
+    "IDENTITY.md",
+    "USER.md",
+    "AGENTS.md",
+    "SOUL.md",
+    "TOOLS.md",
+    "HEARTBEAT.md",
+    "BOOTSTRAP.md",
+)
+BOOTSTRAP_MEMORY_FILES_FOR_ORCH = ("MEMORY.md", "memory.md")
+
+
+def load_bootstrap_for_orchestration(
+    agent_workspace_dir: str,
+    orch_agent_workspace_dir: str,
+    *,
+    max_chars_per_file: int = DEFAULT_MAX_CHARS_PER_FILE,
+    total_max_chars: int = DEFAULT_TOTAL_MAX_CHARS,
+) -> str:
+    """Bootstrap prompt for gateway orchestration: identity from agent dir, memory from orch workspace."""
+    identity = load_bootstrap_system_prompt(
+        agent_workspace_dir,
+        max_chars_per_file=max_chars_per_file,
+        total_max_chars=total_max_chars,
+        file_order=BOOTSTRAP_IDENTITY_FILES_FOR_ORCH,
+    )
+    memory = load_bootstrap_system_prompt(
+        orch_agent_workspace_dir,
+        max_chars_per_file=max_chars_per_file,
+        total_max_chars=total_max_chars,
+        file_order=BOOTSTRAP_MEMORY_FILES_FOR_ORCH,
+    )
+    parts = [p for p in (identity, memory) if p.strip()]
+    return "\n\n".join(parts)
+
 
 def load_bootstrap_system_prompt(
     workspace_dir: str,

@@ -48,6 +48,7 @@ def _notify_transcript_index_delta(
     """Tell MemoryBackend to refresh session chunk in MemoryIndex (Phase 2)."""
     try:
         from ...memory.backend import get_memory_backend
+        from .memory_index_context import current_memory_index_workspace_dir
 
         agent_id = _infer_agent_id_from_transcript_path(transcript_file)
         get_memory_backend().note_session_delta(
@@ -55,6 +56,7 @@ def _notify_transcript_index_delta(
             session_id=session_id,
             bytes_delta=max(0, int(bytes_delta)),
             messages_delta=max(0, int(messages_delta)),
+            workspace_dir=current_memory_index_workspace_dir(),
         )
     except Exception:
         pass

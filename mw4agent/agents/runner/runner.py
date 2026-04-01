@@ -48,6 +48,10 @@ from ..stats.agent_usage import apply_llm_usage
 from mw4agent.log import get_logger
 logger = get_logger(__name__)
 
+from ..session.memory_index_context import (
+    memory_index_workspace_reset,
+    memory_index_workspace_set,
+)
 from ..session.transcript import (
     append_messages as append_transcript_messages,
     append_compaction,
@@ -422,6 +426,29 @@ class AgentRunner:
 
         cfg_mgr = get_default_config_manager()
         agent_workspace_dir = _resolve_run_workspace_dir(params)
+        _mem_ws_tok = memory_index_workspace_set(agent_workspace_dir)
+        try:
+            return await self._execute_agent_turn_inner(
+                params,
+                run_id,
+                session_entry,
+                started,
+                cfg_mgr,
+                agent_workspace_dir,
+            )
+        finally:
+            memory_index_workspace_reset(_mem_ws_tok)
+
+    async def _execute_agent_turn_inner(
+        self,
+        params: AgentRunParams,
+        run_id: str,
+        session_entry: Any,
+        started: float,
+        cfg_mgr: Any,
+        agent_workspace_dir: str,
+    ) -> AgentRunResult:
+        """Body of :meth:`_execute_agent_turn` (split so memory index ContextVar wraps the whole turn)."""
         sandbox_policy = resolve_sandbox_tool_policy_config(cfg_mgr)
         run_sandbox = bool(params.sandbox is True)
         if run_sandbox and not sandbox_policy.enabled:

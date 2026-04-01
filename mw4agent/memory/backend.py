@@ -21,7 +21,7 @@ from .search import (
 )
 from .index import index_files, search_index, upsert_chunk
 from ..config.root import read_root_section
-from ..config.paths import resolve_agent_dir
+from ..config.paths import resolve_agent_workspace_dir, resolve_memory_index_db_path
 
 
 @dataclass
@@ -71,6 +71,7 @@ class MemoryBackend:
         session_id: str,
         bytes_delta: int = 0,
         messages_delta: int = 0,
+        workspace_dir: Optional[str] = None,
     ) -> None:
         """Placeholder for future session delta tracking."""
         return None
@@ -131,14 +132,16 @@ class LocalIndexBackend(MemoryBackend):
     def __init__(self, *, memory_cfg: Dict[str, Any]) -> None:
         self._memory_cfg = memory_cfg if isinstance(memory_cfg, dict) else {}
         self._indexed_workspaces: set[tuple[str, str]] = set()  # (agent_id, workspace_dir)
-        self._indexed_session_mtime: Dict[tuple[str, str], float] = {}  # (agent_id, session_id) -> mtime
+        self._indexed_session_mtime: Dict[tuple[str, str, str], float] = {}  # (agent_id, session_id, db_path) -> mtime
         # Accumulated deltas for memory.sync.sessions thresholds (Phase 2).
-        self._delta_acc: Dict[tuple[str, str], Dict[str, int]] = {}
+        self._delta_acc: Dict[tuple[str, str, str], Dict[str, int]] = {}
 
-    def _db_path_for(self, agent_id: Optional[str]) -> str:
+    def _db_path_for(
+        self, agent_id: Optional[str], workspace_dir: Optional[str] = None
+    ) -> str:
         aid = (agent_id or "").strip().lower() or "main"
-        agent_dir = resolve_agent_dir(aid)
-        return str(Path(agent_dir) / "memory" / "index.sqlite")
+        ws = (workspace_dir or "").strip() or resolve_agent_workspace_dir(aid)
+        return resolve_memory_index_db_path(aid, ws)
 
     def _session_sync_thresholds(self) -> Tuple[int, int]:
         """Return (delta_bytes, delta_messages). Both 0 => sync on every note (default)."""
@@ -160,7 +163,7 @@ class LocalIndexBackend(MemoryBackend):
 
     def _ensure_index(self, *, agent_id: Optional[str], workspace_dir: str) -> str:
         key = ((agent_id or "").strip().lower() or "main", str(Path(workspace_dir).resolve()))
-        db_path = self._db_path_for(agent_id)
+        db_path = self._db_path_for(agent_id, workspace_dir)
         if key not in self._indexed_workspaces:
             index_files(db_path=db_path, workspace_dir=workspace_dir, sources=("memory",))
             self._indexed_workspaces.add(key)
@@ -187,7 +190,7 @@ class LocalIndexBackend(MemoryBackend):
         except OSError:
             return
         aid = (agent_id or "").strip().lower() or "main"
-        k = (aid, sid)
+        k = (aid, sid, db_path)
         if self._indexed_session_mtime.get(k) == mtime:
             return
         msgs = build_messages_from_leaf(transcript_file=transcript_file, limit=200)
@@ -215,14 +218,16 @@ class LocalIndexBackend(MemoryBackend):
         session_id: str,
         bytes_delta: int = 0,
         messages_delta: int = 0,
+        workspace_dir: Optional[str] = None,
     ) -> None:
         """Refresh session chunk in the index (eager or after sync.sessions thresholds)."""
         sid = (session_id or "").strip()
         if not sid:
             return
-        db_path = self._db_path_for(agent_id)
         aid = (agent_id or "").strip().lower() or "main"
-        key = (aid, sid)
+        ws = (workspace_dir or "").strip() or resolve_agent_workspace_dir(aid)
+        db_path = self._db_path_for(agent_id, ws)
+        key = (aid, sid, db_path)
         db_th, dm_th = self._session_sync_thresholds()
         if db_th <= 0 and dm_th <= 0:
             self._ensure_session_index(db_path=db_path, agent_id=agent_id, session_id=sid)

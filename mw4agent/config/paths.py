@@ -82,3 +82,58 @@ def ensure_agent_dirs(agent_id: Optional[str]) -> tuple[str, str, str]:
     os.makedirs(workspace_dir, exist_ok=True)
     os.makedirs(sessions_dir, exist_ok=True)
     return agent_dir, workspace_dir, sessions_dir
+
+
+def orchestrations_root_dir() -> str:
+    """Gateway orchestration state root: ``<state>/orchestrations``."""
+    return os.path.join(get_state_dir(), "orchestrations")
+
+
+def resolve_orchestration_agent_workspace_dir(orch_id: str, agent_id: Optional[str]) -> str:
+    """Per-orchestration per-agent workspace (MEMORY.md, tools cwd, memory index scope).
+
+    Layout: ``<state>/orchestrations/<orchId>/agents/<agentId>/workspace``
+    """
+    oid = (orch_id or "").strip() or "default"
+    aid = normalize_agent_id(agent_id)
+    return os.path.join(orchestrations_root_dir(), oid, "agents", aid, "workspace")
+
+
+def resolve_memory_index_db_path(agent_id: Optional[str], workspace_dir: str) -> str:
+    """SQLite path for :class:`~mw4agent.memory.backend.LocalIndexBackend`.
+
+    - Default agent workspace → ``<agent_dir>/memory/index.sqlite`` (legacy).
+    - Orchestration workspace → ``.../orchestrations/<id>/agents/<aid>/memory/index.sqlite``.
+    - Any other custom workspace → ``<workspace>/.mw4agent_memory/index.sqlite``.
+
+    ``index_files`` rebuilds the ``memory`` source for one workspace per DB; separate DBs
+    avoid cross-workspace deletes in a shared file.
+    """
+    aid = normalize_agent_id(agent_id)
+    ws = Path(workspace_dir).resolve()
+    default_ws = Path(resolve_agent_workspace_dir(aid)).resolve()
+    if ws == default_ws:
+        p = Path(resolve_agent_dir(aid)) / "memory" / "index.sqlite"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return str(p)
+    orch_root = (Path(get_state_dir()).resolve() / "orchestrations")
+    try:
+        rel = ws.relative_to(orch_root)
+    except ValueError:
+        p = ws / ".mw4agent_memory" / "index.sqlite"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return str(p)
+    parts = rel.parts
+    if (
+        len(parts) >= 4
+        and parts[1] == "agents"
+        and parts[3] == "workspace"
+        and normalize_agent_id(parts[2]) == aid
+    ):
+        base = orch_root / parts[0] / "agents" / parts[2]
+        p = base / "memory" / "index.sqlite"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return str(p)
+    p = ws / ".mw4agent_memory" / "index.sqlite"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return str(p)

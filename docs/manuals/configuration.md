@@ -246,7 +246,8 @@ run 级开关：
 
 - **`tools.sandbox.directoryIsolation`**：是否把 `read` / `write` / `exec` / `process_*` 的根目录切到**会话专属目录**（默认：未设置时，只要本轮 sandbox 生效就 **开启**；设为 `false` 可只做工具策略、不改变目录）
 - **`tools.sandbox.workspaceRoot`**：会话沙箱根路径（默认：`~/.mw4agent/sandbox-sessions`，可用环境变量 `MW4AGENT_SANDBOX_WORKSPACE_DIR` 覆盖）
-- 布局：`<workspaceRoot>/<agentId>/<sessionId>/`。长期记忆 `memory_*` 仍绑定**智能体 workspace**（`agent_workspace_dir`），不会写到会话沙箱目录。
+- 布局：`<workspaceRoot>/<agentId>/<sessionId>/`。在**非编排**的普通对话 run 下，长期记忆 `memory_*` 仍绑定**该 agent 的默认 workspace**（`agent_workspace_dir`），不会写到会话沙箱目录。  
+  **Gateway 多智能体编排**（`orchestrator`）下各 agent 使用独立的编排 workspace，见下文「7.1」。
 
 执行隔离（预留，当前不生效）：
 
@@ -394,6 +395,20 @@ Serper 示例：
 
 - **`MW4AGENT_STATE_DIR`**：状态目录（默认 `~/.mw4agent`）
 - **`MW4AGENT_WORKSPACE_DIR`**：workspace 目录全局覆盖（默认 `~/.mw4agent/agents/<agentId>/workspace`，不建议轻易覆盖多 agent 情况）
+
+### 7.1 Gateway 编排（orchestrator）与长期记忆路径
+
+多智能体编排任务使用**按编排实例、按 agent 隔离**的 workspace，避免协作过程中写入的 `MEMORY.md` / `memory/*.md` 污染同一 agent 在独立对话中的目录。
+
+| 用途 | 路径（`<STATE>` = `MW4AGENT_STATE_DIR`，默认 `~/.mw4agent`） |
+|------|----------------------------------------------------------------|
+| 编排状态（参与者、DAG、消息等） | `<STATE>/orchestrations/<orchId>/`（如 `orch.json`） |
+| 编排内某 agent 的**运行 workspace**（文件工具根目录、`MEMORY.md` 等） | `<STATE>/orchestrations/<orchId>/agents/<agentId>/workspace` |
+| 该 workspace 在启用根配置 `memory.enabled` 时的 **SQLite 索引** | `<STATE>/orchestrations/<orchId>/agents/<agentId>/memory/index.sqlite` |
+
+**系统提示中的引导文件**：编排 run 下，身份类文件（如 `IDENTITY.md`、`USER.md`、`AGENTS.md` 等）仍从 **agent 配置的工作区**（`~/.mw4agent/agents/<agentId>/workspace` 或其 `agent.json` 覆盖路径）读取；**记忆类**（`MEMORY.md`、`memory.md`）仅从上述**编排 workspace** 读取，使编排内长期记忆与单 agent 会话分离。
+
+**会话 transcript**（短期对话 JSONL）仍落在 `<STATE>/agents/<agentId>/sessions/<sessionId>.jsonl`；若开启 memory 索引中的 session 片段，索引会与当前 run 使用的 workspace 对应到同一套 SQLite，避免与仅文件检索脱节。
 
 ---
 

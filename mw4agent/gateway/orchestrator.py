@@ -14,9 +14,9 @@ from typing import Any, Dict, List, Optional
 from ..agents.agent_manager import AgentManager
 from ..agents.runner.runner import AgentRunner
 from ..agents.types import AgentRunParams
-from ..config.paths import get_state_dir, normalize_agent_id
+from ..config.paths import get_state_dir, normalize_agent_id, resolve_orchestration_agent_workspace_dir
 from ..llm.backends import _call_openai_chat, _thinking_extra_body, list_providers  # type: ignore
-from ..memory.bootstrap import load_bootstrap_system_prompt
+from ..memory.bootstrap import load_bootstrap_for_orchestration
 
 from .dag_spec import MAX_UPSTREAM_SNIPPET, normalize_dag_dict
 
@@ -42,6 +42,13 @@ def _orch_dir(orch_id: str) -> str:
 
 def _orch_state_path(orch_id: str) -> str:
     return os.path.join(_orch_dir(orch_id), "orch.json")
+
+
+def _orch_agent_workspace(orch_id: str, agent_id: str) -> str:
+    """Isolated workspace for orchestration runs (MEMORY.md, tools cwd, memory index)."""
+    p = resolve_orchestration_agent_workspace_dir(orch_id, agent_id)
+    os.makedirs(p, exist_ok=True)
+    return p
 
 
 def _strip_at_mentions(text: str) -> str:
@@ -770,8 +777,8 @@ class Orchestrator:
                     st.agentSessions[agent_id] = session_id
 
                     cfg = self.agent_manager.get_or_create(agent_id)
-                    workspace_dir = cfg.workspace_dir
-                    bootstrap = load_bootstrap_system_prompt(workspace_dir)
+                    workspace_dir = _orch_agent_workspace(orch_id, agent_id)
+                    bootstrap = load_bootstrap_for_orchestration(cfg.workspace_dir, workspace_dir)
                     orch_hint = (
                         "You are part of a multi-agent orchestration.\n"
                         "Reply concisely, and include actionable outputs.\n"
@@ -964,8 +971,8 @@ class Orchestrator:
                     session_id = st.agentSessions.get(agent_id) or str(uuid.uuid4())
                     st.agentSessions[agent_id] = session_id
                     cfg = self.agent_manager.get_or_create(agent_id)
-                    workspace_dir = cfg.workspace_dir
-                    bootstrap = load_bootstrap_system_prompt(workspace_dir)
+                    workspace_dir = _orch_agent_workspace(orch_id, agent_id)
+                    bootstrap = load_bootstrap_for_orchestration(cfg.workspace_dir, workspace_dir)
                     orch_hint = (
                         "You are part of a multi-agent supervisor pipeline orchestration.\n"
                         "Reply concisely, and include actionable outputs.\n"
@@ -1114,8 +1121,8 @@ class Orchestrator:
         self._save(st)
 
         cfg = self.agent_manager.get_or_create(agent_id)
-        workspace_dir = cfg.workspace_dir
-        bootstrap = load_bootstrap_system_prompt(workspace_dir)
+        workspace_dir = _orch_agent_workspace(orch_id, agent_id)
+        bootstrap = load_bootstrap_for_orchestration(cfg.workspace_dir, workspace_dir)
         orch_hint = (
             "You are part of a multi-agent DAG orchestration.\n"
             f"Current node id: {nid!r}. Reply concisely with actionable output.\n"

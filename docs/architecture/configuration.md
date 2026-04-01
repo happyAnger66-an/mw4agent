@@ -123,3 +123,4 @@ mw4agent configuration
 - LLM  provider 与 backends 解析优先级：[llm/provider_config.md](llm/provider_config.md)
 - 配置加密与 ConfigManager：[crypto/encryption-framework.md](crypto/encryption-framework.md)
 - CLI 入口与注册：[cli/README.md](cli/README.md)
+- Gateway 多智能体编排下的 workspace / memory 磁盘布局与引导文件规则：[manuals/configuration.md](../manuals/configuration.md) 中「7.1 Gateway 编排（orchestrator）与长期记忆路径」

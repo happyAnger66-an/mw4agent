@@ -64,6 +64,10 @@ def test_local_index_backend_search_uses_sqlite_index(tmp_path, monkeypatch):
 
 
 def test_local_index_backend_search_includes_session_transcript(tmp_path, monkeypatch):
+    from mw4agent.agents.session.memory_index_context import (
+        memory_index_workspace_reset,
+        memory_index_workspace_set,
+    )
     from mw4agent.agents.session.transcript import append_messages, resolve_session_transcript_path
 
     monkeypatch.setenv("MW4AGENT_STATE_DIR", str(tmp_path / ".mw4agent"))
@@ -82,15 +86,19 @@ def test_local_index_backend_search_includes_session_transcript(tmp_path, monkey
 
     sid = "s1"
     tf = resolve_session_transcript_path(agent_id="main", session_id=sid)
-    append_messages(
-        transcript_file=tf,
-        session_id=sid,
-        cwd=str(ws),
-        messages=[
-            {"role": "user", "content": "session hello world"},
-            {"role": "assistant", "content": "ack"},
-        ],
-    )
+    tok = memory_index_workspace_set(str(ws))
+    try:
+        append_messages(
+            transcript_file=tf,
+            session_id=sid,
+            cwd=str(ws),
+            messages=[
+                {"role": "user", "content": "session hello world"},
+                {"role": "assistant", "content": "ack"},
+            ],
+        )
+    finally:
+        memory_index_workspace_reset(tok)
 
     opts = SearchOptions(max_results=5, min_score=0.0, session_id=sid, agent_id="main")
     results = backend.search("session hello", str(ws), options=opts)
@@ -120,6 +128,10 @@ def test_search_index_includes_timestamps_and_session_id(tmp_path):
 
 
 def test_local_index_session_sync_threshold_skips_eager_chunk(tmp_path, monkeypatch):
+    from mw4agent.agents.session.memory_index_context import (
+        memory_index_workspace_reset,
+        memory_index_workspace_set,
+    )
     from mw4agent.agents.session.transcript import append_messages, resolve_session_transcript_path
 
     monkeypatch.setenv("MW4AGENT_STATE_DIR", str(tmp_path / ".mw4agent"))
@@ -145,7 +157,7 @@ def test_local_index_session_sync_threshold_skips_eager_chunk(tmp_path, monkeypa
 
     backend = get_memory_backend()
     assert isinstance(backend, LocalIndexBackend)
-    db_path = backend._db_path_for("main")
+    db_path = backend._db_path_for("main", str(ws))
     # Materialize index DB (memory chunks only) before counting session rows.
     backend.search(
         "bootstrap",
@@ -155,12 +167,16 @@ def test_local_index_session_sync_threshold_skips_eager_chunk(tmp_path, monkeypa
 
     sid = "th1"
     tf = resolve_session_transcript_path(agent_id="main", session_id=sid)
-    append_messages(
-        transcript_file=tf,
-        session_id=sid,
-        cwd=str(ws),
-        messages=[{"role": "user", "content": "threshold marker phrase"}],
-    )
+    tok = memory_index_workspace_set(str(ws))
+    try:
+        append_messages(
+            transcript_file=tf,
+            session_id=sid,
+            cwd=str(ws),
+            messages=[{"role": "user", "content": "threshold marker phrase"}],
+        )
+    finally:
+        memory_index_workspace_reset(tok)
 
     assert _count_chunks(db_path=db_path, source="session") == 0
 
