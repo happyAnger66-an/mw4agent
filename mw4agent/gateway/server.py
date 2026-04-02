@@ -178,6 +178,19 @@ def create_app(
         session_manager = MultiAgentSessionManager(agent_manager=agent_manager)
     runner = AgentRunner(session_manager)
     orchestrator = Orchestrator(agent_manager=agent_manager, runner=runner)
+    try:
+        n_stale = orchestrator.reconcile_stale_running_states()
+        if n_stale > 0:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "reconciled %s orchestration(s) stuck as running after gateway restart",
+                n_stale,
+            )
+    except Exception:
+        import logging as _logging
+
+        _logging.getLogger(__name__).exception("orchestrator reconcile_stale_running_states failed")
 
     # --- Feishu：按 channels.feishu 解析出的全部账号自动注册；webhook 挂载多路由，websocket 在 lifespan 内各启一条连接 ---
     feishu_webhook_routers: List[Any] = []
@@ -1196,6 +1209,10 @@ def create_app(
                 )
             except (TypeError, ValueError):
                 sup_llm_retries_int = None
+            _orl_run = params.get("orchReplyLanguage") or params.get("orch_reply_language")
+            orch_reply_language_run = (
+                str(_orl_run).strip() if _orl_run is not None and str(_orl_run).strip() else None
+            )
             try:
                 st = orchestrator.create(
                     session_key=session_key,
@@ -1210,6 +1227,7 @@ def create_app(
                     supervisor_llm=supervisor_llm_dict,
                     supervisor_max_iterations=sup_run_max,
                     supervisor_llm_max_retries=sup_llm_retries_int,
+                    orch_reply_language=orch_reply_language_run,
                 )
                 orchestrator.send(orch_id=st.orchId, message=message)
             except ValueError as e:
@@ -1271,6 +1289,12 @@ def create_app(
                 )
             except (TypeError, ValueError):
                 sup_llm_retries_int = None
+            _orl_create = params.get("orchReplyLanguage") or params.get("orch_reply_language")
+            orch_reply_language_create = (
+                str(_orl_create).strip()
+                if _orl_create is not None and str(_orl_create).strip()
+                else None
+            )
             try:
                 st = orchestrator.create(
                     session_key=session_key,
@@ -1285,6 +1309,7 @@ def create_app(
                     supervisor_llm=supervisor_llm_dict,
                     supervisor_max_iterations=sup_max_int,
                     supervisor_llm_max_retries=sup_llm_retries_int,
+                    orch_reply_language=orch_reply_language_create,
                 )
             except ValueError as e:
                 return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": str(e)}}
@@ -1348,6 +1373,10 @@ def create_app(
                 )
             except (TypeError, ValueError):
                 sup_llm_retries_int = None
+            _orl_upd = params.get("orchReplyLanguage") or params.get("orch_reply_language")
+            orch_reply_language_update = (
+                str(_orl_upd).strip() if _orl_upd is not None and str(_orl_upd).strip() else None
+            )
             try:
                 st = orchestrator.update(
                     orch_id,
@@ -1363,6 +1392,7 @@ def create_app(
                     supervisor_llm=supervisor_llm_dict,
                     supervisor_max_iterations=sup_max_int,
                     supervisor_llm_max_retries=sup_llm_retries_int,
+                    orch_reply_language=orch_reply_language_update,
                 )
             except ValueError as e:
                 return {
@@ -1396,6 +1426,7 @@ def create_app(
                         "createdAt": st.createdAt,
                         "updatedAt": st.updatedAt,
                         "error": st.error,
+                        "orchReplyLanguage": getattr(st, "orchReplyLanguage", "auto"),
                     }
                 )
             return {"id": req_id, "ok": True, "payload": {"orchestrations": items}}
@@ -1466,6 +1497,7 @@ def create_app(
                 "supervisorLastDecision": getattr(st, "supervisorLastDecision", None),
                 "supervisorLlm": supervisor_public,
                 "supervisorApiKeyConfigured": supervisor_key_configured,
+                "orchReplyLanguage": getattr(st, "orchReplyLanguage", "auto"),
             }
             return {"id": req_id, "ok": True, "payload": payload}
 

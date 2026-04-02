@@ -30,12 +30,36 @@ _ROUTER_LLM_IMMEDIATE_MAX_CHARS = 8000
 # Per-agent role line for router prompt (identity / responsibilities).
 _ROUTER_AGENT_ROLE_MAX_CHARS = 2000
 
-# Appended to every orchestration ``orch_hint``: match user language for reasoning (if shown) and replies.
-_ORCH_LANGUAGE_HINT_EN_ZH = (
-    "Language: Use the same language as the user for reasoning (if shown) and for the final reply "
-    "(e.g. Chinese when the user writes in Chinese).\n"
-    "语言：与用户保持一致——若展示推理过程，与最终回复均使用用户所用语言（例如用户使用中文则用中文）。\n"
-)
+def _normalize_orch_reply_language(raw: Optional[str]) -> str:
+    """Persisted values: ``auto`` | ``zh`` | ``en``."""
+    s = (raw or "").strip().lower()
+    if s in ("zh", "zh-cn", "chinese", "中文", "cn"):
+        return "zh"
+    if s in ("en", "english", "英文"):
+        return "en"
+    return "auto"
+
+
+def _orch_language_block(mode: Optional[str]) -> str:
+    """Extra system text for each orchestrated agent run (high priority vs. generic English bootstrap)."""
+    m = _normalize_orch_reply_language(mode)
+    if m == "zh":
+        return (
+            "【回复语言 — 必须遵守】本编排中，助手所有输出（含对用户可见的正文、推理说明、工具结果摘要）"
+            "必须使用简体中文。不要默认使用英文。\n"
+            "[Mandatory] Use Simplified Chinese (简体中文) for ALL assistant-visible text in this orchestration.\n"
+        )
+    if m == "en":
+        return (
+            "[Mandatory] Use English for ALL assistant-visible text in this orchestration "
+            "(including reasoning and tool narration).\n"
+        )
+    return (
+        "【回复语言 — 自动跟随】若用户使用中文提问或对话，助手必须用中文撰写全部可见内容（含推理与工具说明）；"
+        "若用户明确使用英文，则用英文。不要仅因系统/记忆文件为英文就默认英文回复。\n"
+        "Language: Match the user's language for the full reply. If the user writes in Chinese, "
+        "reply fully in Chinese unless they explicitly switch to English.\n"
+    )
 
 # Supervisor LLM: delay between retries after connection/transport/empty response failures.
 _SUPERVISOR_LLM_RETRY_DELAY_S = 10.0
@@ -110,6 +134,8 @@ class OrchState:
     dagNodeSessions: Dict[str, str] = field(default_factory=dict)  # DAG node id -> sessionId
     # Last send: off | on | stream — controls AgentRunParams.reasoning_level for agent runs
     orchReasoningLevel: Optional[str] = None
+    # User-facing reply language for this orchestration: auto | zh | en (see _normalize_orch_reply_language)
+    orchReplyLanguage: str = "auto"
     # Next linear run: reply only from this agent (round_robin / router_llm), then cleared
     pendingDirectAgent: Optional[str] = None
     pendingSingleTurn: bool = False
@@ -292,12 +318,29 @@ def _build_router_llm_user_prompt(
     turn_1based: int,
     max_turns: int,
     agent_roles: Optional[Dict[str, str]] = None,
+    reply_language: str = "auto",
 ) -> str:
     agent_list = ", ".join(participants)
     ou = _truncate_text(original_user, _ROUTER_LLM_ORIGINAL_USER_MAX_CHARS)
     tr = (transcript or "").strip() or "(empty)"
     li = _truncate_text(last_immediate, _ROUTER_LLM_IMMEDIATE_MAX_CHARS)
     roles_block = _format_router_agent_roles_block(participants, agent_roles)
+    rl = _normalize_orch_reply_language(reply_language)
+    lang_tail = ""
+    if rl == "zh":
+        lang_tail = (
+            "\n\nOrchestration reply language: Simplified Chinese — the chosen agent must reply to "
+            "the user in 简体中文 (not English by default).\n"
+        )
+    elif rl == "en":
+        lang_tail = (
+            "\n\nOrchestration reply language: English — the chosen agent must reply in English.\n"
+        )
+    else:
+        lang_tail = (
+            "\n\nOrchestration reply language: auto — match the user's language in the transcript "
+            "(if the user wrote in Chinese, the next agent should reply in Chinese).\n"
+        )
     return (
         "You are the routing model for a multi-agent team. "
         "Choose exactly ONE next speaker from the candidates.\n\n"
@@ -312,6 +355,7 @@ def _build_router_llm_user_prompt(
         "Reply with ONLY valid JSON, no markdown fences, a single object:\n"
         '{"next_agent":"<candidate_id>"}\n'
         "The next_agent value must be exactly one of the candidate ids."
+        f"{lang_tail}"
     )
 
 
@@ -350,6 +394,28 @@ class Orchestrator:
         self.agent_manager = agent_manager
         self.runner = runner
         self._tasks: Dict[str, asyncio.Task] = {}
+
+    def reconcile_stale_running_states(self) -> int:
+        """After gateway process restart, persisted ``status=running`` is stale (no asyncio task).
+
+        ``orch.json`` is written with ``running`` when a background task starts; if the gateway
+        exits before the task finishes, the next process still sees ``running``, which blocks
+        :meth:`send` and makes desktop UIs wait forever.
+
+        Returns the number of orchestrations updated.
+        """
+        n = 0
+        for st in self.list():
+            if (st.status or "").strip() != "running":
+                continue
+            st.status = "error"
+            st.error = (
+                "Gateway restarted while orchestration was running; the run was interrupted. "
+                "You can send a new message to continue."
+            )
+            self._save(st)
+            n += 1
+        return n
 
     @staticmethod
     def _patch_router_llm(
@@ -468,6 +534,9 @@ class Orchestrator:
             x = orch_rl_raw.strip().lower()
             if x in ("off", "on", "stream"):
                 orch_rl = x
+        orch_reply_lang = _normalize_orch_reply_language(
+            data.get("orchReplyLanguage") or data.get("orch_reply_language")
+        )
         pd_raw = data.get("pendingDirectAgent") or data.get("pending_direct_agent")
         pd_agent: Optional[str] = None
         if isinstance(pd_raw, str) and pd_raw.strip():
@@ -538,6 +607,7 @@ class Orchestrator:
             dagParallelism=dpar,
             dagNodeSessions=dag_node_sess,
             orchReasoningLevel=orch_rl,
+            orchReplyLanguage=orch_reply_lang,
             pendingDirectAgent=pd_agent,
             pendingSingleTurn=pending_single,
             supervisorPipeline=sup_pipeline,
@@ -601,6 +671,7 @@ class Orchestrator:
         supervisor_llm: Optional[Dict[str, str]] = None,
         supervisor_max_iterations: Optional[int] = None,
         supervisor_llm_max_retries: Optional[int] = None,
+        orch_reply_language: Optional[str] = None,
     ) -> OrchState:
         orch_id = str(uuid.uuid4())
         strat = (strategy or "round_robin").strip() or "round_robin"
@@ -694,6 +765,7 @@ class Orchestrator:
             supervisorLlmMaxRetries=smr_default if sup_pipeline else 12,
             supervisorIteration=0,
             supervisorLastDecision=None,
+            orchReplyLanguage=_normalize_orch_reply_language(orch_reply_language),
         )
         if dag is not None:
             st.supervisorPipeline = []
@@ -719,6 +791,7 @@ class Orchestrator:
         supervisor_llm: Optional[Dict[str, str]] = None,
         supervisor_max_iterations: Optional[int] = None,
         supervisor_llm_max_retries: Optional[int] = None,
+        orch_reply_language: Optional[str] = None,
     ) -> OrchState:
         """Update orchestration metadata. Refuses when ``status == running``."""
         oid = (orch_id or "").strip()
@@ -844,6 +917,8 @@ class Orchestrator:
         st.error = None
         st.pendingDirectAgent = None
         st.pendingSingleTurn = False
+        if orch_reply_language is not None:
+            st.orchReplyLanguage = _normalize_orch_reply_language(orch_reply_language)
         self._save(st)
         return st
 
@@ -858,6 +933,7 @@ class Orchestrator:
         router_llm: Optional[Dict[str, str]] = None,
         router_agent_roles: Optional[Dict[str, Any]] = None,
         dag: Optional[Dict[str, Any]] = None,
+        orch_reply_language: Optional[str] = None,
     ) -> OrchState:
         # Back-compat: create + send
         st = self.create(
@@ -869,6 +945,7 @@ class Orchestrator:
             router_llm=router_llm,
             router_agent_roles=router_agent_roles,
             dag=dag,
+            orch_reply_language=orch_reply_language,
         )
         self.send(orch_id=st.orchId, message=message)
         return self._load(st.orchId) or st
@@ -987,6 +1064,7 @@ class Orchestrator:
                                 turn_1based=cur_turn,
                                 max_turns=batch_turns,
                                 agent_roles=getattr(st, "routerAgentRoles", None),
+                                reply_language=getattr(st, "orchReplyLanguage", "auto"),
                             )
                             provider = (router.get("provider") or "").strip() or "openai"
                             model = (router.get("model") or "").strip() or "gpt-4o-mini"
@@ -1033,7 +1111,7 @@ class Orchestrator:
                             "You are part of a multi-agent orchestration.\n"
                             "Reply concisely, and include actionable outputs.\n"
                         )
-                    ) + _ORCH_LANGUAGE_HINT_EN_ZH
+                    ) + _orch_language_block(st.orchReplyLanguage)
                     extra_system_prompt = f"{bootstrap}\n\n{orch_hint}".strip() if bootstrap else orch_hint
 
                     if r == start_round and st.messages and st.messages[-1].role == "user":
@@ -1111,6 +1189,7 @@ class Orchestrator:
         macro: int,
         max_macro: int,
         brief_hint: str,
+        reply_language: str = "auto",
     ) -> str:
         pipe_s = " → ".join(pipeline)
         tail = (
@@ -1118,6 +1197,20 @@ class Orchestrator:
             if (brief_hint or "").strip()
             else ""
         )
+        rl = _normalize_orch_reply_language(reply_language)
+        lang_json = ""
+        if rl == "zh":
+            lang_json = (
+                "\n语言：JSON 中的字符串字段（reason、brief_for_next_stroke、final_user_visible_summary）"
+                "请使用简体中文；键名保持英文。\n"
+            )
+        elif rl == "en":
+            lang_json = "\nLanguage: write JSON string values in English.\n"
+        else:
+            lang_json = (
+                "\nLanguage: match the user's language in the user goal for JSON string values "
+                "(reason, brief_for_next_stroke, final_user_visible_summary).\n"
+            )
         return (
             "You are the orchestration supervisor. After each pipeline run (agents in fixed order), "
             "decide whether to run another macro-iteration.\n\n"
@@ -1134,6 +1227,7 @@ class Orchestrator:
             '"final_user_visible_summary":"optional when action is stop"}\n\n'
             "Rules: If the user goal is satisfied, use action stop. "
             "If more refinement is needed, use continue and a clear brief_for_next_stroke."
+            f"{lang_json}"
         )
 
     async def _supervisor_call_llm(self, orch_id: str, sup: Dict[str, str], prompt: str) -> str:
@@ -1237,7 +1331,7 @@ class Orchestrator:
                     orch_hint = (
                         "You are part of a multi-agent supervisor pipeline orchestration.\n"
                         "Reply concisely, and include actionable outputs.\n"
-                    ) + _ORCH_LANGUAGE_HINT_EN_ZH
+                    ) + _orch_language_block(st.orchReplyLanguage)
                     extra_system_prompt = f"{bootstrap}\n\n{orch_hint}".strip() if bootstrap else orch_hint
                     if agent_id == pipeline[0]:
                         agent_message = _strip_at_mentions(last_text)
@@ -1280,6 +1374,7 @@ class Orchestrator:
                     next_r += 1
                     self._save(st)
                 c_output = last_text
+                st_sup = self._load(orch_id)
                 prompt = self._supervisor_build_prompt(
                     original_user_text=original_user_text,
                     pipeline=pipeline,
@@ -1287,6 +1382,7 @@ class Orchestrator:
                     macro=macro,
                     max_macro=max_macro,
                     brief_hint=brief_for_next,
+                    reply_language=getattr(st_sup, "orchReplyLanguage", "auto") if st_sup else "auto",
                 )
                 raw = await self._supervisor_call_llm_with_retries(
                     orch_id, sup, prompt, max_sup_llm_retries
@@ -1387,7 +1483,7 @@ class Orchestrator:
         orch_hint = (
             "You are part of a multi-agent DAG orchestration.\n"
             f"Current node id: {nid!r}. Reply concisely with actionable output.\n"
-        ) + _ORCH_LANGUAGE_HINT_EN_ZH
+        ) + _orch_language_block(st.orchReplyLanguage)
         extra_system_prompt = f"{bootstrap}\n\n{orch_hint}".strip() if bootstrap else orch_hint
 
         result = await self.runner.run(

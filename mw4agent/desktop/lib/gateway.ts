@@ -630,6 +630,9 @@ export type OrchestrateDagSpec = {
   parallelism?: number;
 };
 
+/** Orchestration user-visible reply language (gateway persists ``orchReplyLanguage``). */
+export type OrchestrateReplyLanguage = "auto" | "zh" | "en";
+
 export type OrchestrateRunBody = {
   sessionKey: string;
   name?: string;
@@ -657,6 +660,8 @@ export type OrchestrateRunBody = {
   };
   supervisorMaxIterations?: number;
   supervisorLlmMaxRetries?: number;
+  /** ``auto`` = follow user language; ``zh`` / ``en`` = force. */
+  orchReplyLanguage?: OrchestrateReplyLanguage;
   idempotencyKey: string;
 };
 
@@ -681,6 +686,7 @@ export async function orchestrateRun(
     supervisorLlm: body.supervisorLlm,
     supervisorMaxIterations: body.supervisorMaxIterations,
     supervisorLlmMaxRetries: body.supervisorLlmMaxRetries,
+    ...(body.orchReplyLanguage != null ? { orchReplyLanguage: body.orchReplyLanguage } : {}),
     idempotencyKey: body.idempotencyKey,
   });
   if (!r.ok || !r.payload) {
@@ -721,6 +727,7 @@ export type OrchestrateCreateBody = {
   supervisorMaxIterations?: number;
   /** Retries after a failed/empty supervisor HTTP call; 10s between attempts. */
   supervisorLlmMaxRetries?: number;
+  orchReplyLanguage?: OrchestrateReplyLanguage;
   idempotencyKey: string;
 };
 
@@ -744,6 +751,7 @@ export async function orchestrateCreate(
     supervisorLlm: body.supervisorLlm,
     supervisorMaxIterations: body.supervisorMaxIterations,
     supervisorLlmMaxRetries: body.supervisorLlmMaxRetries,
+    ...(body.orchReplyLanguage != null ? { orchReplyLanguage: body.orchReplyLanguage } : {}),
     idempotencyKey: body.idempotencyKey,
   });
   if (!r.ok || !r.payload) {
@@ -780,6 +788,7 @@ export async function orchestrateUpdate(
     supervisorLlm: body.supervisorLlm,
     supervisorMaxIterations: body.supervisorMaxIterations,
     supervisorLlmMaxRetries: body.supervisorLlmMaxRetries,
+    ...(body.orchReplyLanguage != null ? { orchReplyLanguage: body.orchReplyLanguage } : {}),
     idempotencyKey: body.idempotencyKey,
   });
   if (!r.ok || !r.payload) {
@@ -805,6 +814,7 @@ export type OrchestrateListItem = {
   createdAt?: number;
   updatedAt?: number;
   error?: string;
+  orchReplyLanguage?: OrchestrateReplyLanguage;
 };
 
 export type OrchestrateListResult =
@@ -872,6 +882,7 @@ export type OrchestrateGetResult =
       supervisorLastDecision?: Record<string, unknown> | null;
       supervisorLlm?: OrchestrateRouterLlmPublic | null;
       supervisorApiKeyConfigured?: boolean;
+      orchReplyLanguage?: OrchestrateReplyLanguage;
     }
   | { ok: false; error?: string };
 
@@ -938,6 +949,13 @@ export async function orchestrateGet(orchId: string): Promise<OrchestrateGetResu
         ? (p.supervisorLlm as OrchestrateRouterLlmPublic)
         : undefined,
     supervisorApiKeyConfigured: Boolean(p.supervisorApiKeyConfigured),
+    orchReplyLanguage: ((): OrchestrateReplyLanguage | undefined => {
+      const raw = p.orchReplyLanguage;
+      if (typeof raw !== "string") return undefined;
+      const s = raw.trim().toLowerCase();
+      if (s === "zh" || s === "en" || s === "auto") return s as OrchestrateReplyLanguage;
+      return undefined;
+    })(),
   };
 }
 

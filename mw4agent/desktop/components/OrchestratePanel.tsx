@@ -26,6 +26,7 @@ import {
   type OrchMessage,
   type OrchestrateDagSpec,
   type OrchestrateListItem,
+  type OrchestrateReplyLanguage,
 } from "@/lib/gateway";
 import { specHasCycle } from "@/lib/orchestrateDagFlow";
 import { parseOrchestrateTargetAgent } from "@/lib/orchestrateMention";
@@ -197,6 +198,8 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
   const [createStrategy, setCreateStrategy] = useState<
     "round_robin" | "router_llm" | "dag" | "supervisor_pipeline"
   >("round_robin");
+  const [createOrchReplyLanguage, setCreateOrchReplyLanguage] =
+    useState<OrchestrateReplyLanguage>("auto");
   const [createDagSpec, setCreateDagSpec] = useState<OrchestrateDagSpec>(DEFAULT_DAG_SPEC);
   const [createDagJson, setCreateDagJson] = useState(() =>
     JSON.stringify(DEFAULT_DAG_SPEC, null, 2)
@@ -480,6 +483,32 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     };
   }, [loadOrches, selectedOrchId, t]);
 
+  // After gateway/WebSocket reconnect, immediately resync status (server may have reconciled stale ``running``).
+  useEffect(() => {
+    if (connectionState !== "connected") return;
+    const orchId = selectedOrchId.trim();
+    if (!orchId) return;
+    let cancelled = false;
+    void orchestrateGet(orchId).then((r) => {
+      if (cancelled || !r.ok) return;
+      setError(null);
+      setSelected({
+        orchId: r.orchId,
+        name: r.name,
+        status: r.status,
+        strategy: r.strategy,
+        participants: r.participants,
+        messages: r.messages || [],
+        dagProgress: r.dagProgress ?? undefined,
+      });
+      setBusy(busyFromOrchestrateStatus(r.status));
+      void loadOrches();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [connectionState, selectedOrchId, loadOrches]);
+
   const addParticipant = useCallback((aid: string) => {
     const v = (aid || "").trim();
     if (!v) return;
@@ -536,6 +565,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
           messages: g.messages || [],
           dagProgress: g.dagProgress ?? undefined,
         });
+        setBusy(busyFromOrchestrateStatus(g.status));
       }
     } catch (e) {
       setBusy(false);
@@ -601,6 +631,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     setSupervisorThinking("");
     setCreateSupervisorMaxIter("5");
     setCreateSupervisorLlmMaxRetries("12");
+    setCreateOrchReplyLanguage("auto");
     setRouterLlmTestBanner(null);
     setRouterLlmTestLoading(false);
     setSupervisorLlmTestBanner(null);
@@ -775,6 +806,11 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
             : 12
         )
       );
+      setCreateOrchReplyLanguage(
+        r.orchReplyLanguage === "zh" || r.orchReplyLanguage === "en"
+          ? r.orchReplyLanguage
+          : "auto"
+      );
       setOrchFormOpen(true);
     },
     [t]
@@ -885,6 +921,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
           supLlmRetries >= 0
             ? Math.min(64, Math.floor(supLlmRetries))
             : undefined,
+        orchReplyLanguage: createOrchReplyLanguage,
         idempotencyKey: idem,
       });
       if (!res.ok) {
@@ -918,6 +955,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
         supLlmRetries >= 0
           ? Math.min(64, Math.floor(supLlmRetries))
           : undefined,
+      orchReplyLanguage: createOrchReplyLanguage,
       idempotencyKey: idem,
     });
     if (!res.ok) {
@@ -931,6 +969,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     createDagJson,
     createMaxRounds,
     createName,
+    createOrchReplyLanguage,
     createParticipants,
     createStrategy,
     loadOrches,
@@ -1463,6 +1502,24 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
                   <option value="dag">{t("orchestrateStrategyDag")}</option>
                   <option value="supervisor_pipeline">{t("orchestrateStrategySupervisor")}</option>
                 </select>
+              </label>
+
+              <label className="flex flex-col gap-1">
+                <span className="text-[var(--muted)] text-xs">{t("orchestrateReplyLanguage")}</span>
+                <select
+                  className="px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-[var(--text)] text-xs"
+                  value={createOrchReplyLanguage}
+                  onChange={(e) =>
+                    setCreateOrchReplyLanguage(e.target.value as OrchestrateReplyLanguage)
+                  }
+                >
+                  <option value="auto">{t("orchestrateReplyLanguageAuto")}</option>
+                  <option value="zh">{t("orchestrateReplyLanguageZh")}</option>
+                  <option value="en">{t("orchestrateReplyLanguageEn")}</option>
+                </select>
+                <p className="text-[10px] text-[var(--muted)] leading-relaxed">
+                  {t("orchestrateReplyLanguageHint")}
+                </p>
               </label>
 
               {createStrategy === "dag" ? (

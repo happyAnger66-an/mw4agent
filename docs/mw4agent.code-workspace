@@ -10,10 +10,10 @@
 			"path": "../../../clawbot-plugins/feishu-openclaw-plugin"
 		},
 		{
-			"path": "../../claude-code"
+			"path": "../../mem0"
 		},
 		{
-			"path": "../../mem0"
+			"path": "../../../ClaudeCode"
 		}
 	],
 	"settings": {}

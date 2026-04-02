@@ -73,6 +73,12 @@ const en: Record<string, string> = {
   orchestrateStrategyRouter: "Router LLM",
   orchestrateStrategyDag: "DAG",
   orchestrateStrategySupervisor: "Supervisor pipeline",
+  orchestrateReplyLanguage: "Reply language",
+  orchestrateReplyLanguageHint:
+    "Controls assistant-visible text in this orchestration. Auto follows the user; zh/en force output.",
+  orchestrateReplyLanguageAuto: "Auto (follow user)",
+  orchestrateReplyLanguageZh: "简体中文",
+  orchestrateReplyLanguageEn: "English",
   orchestrateSupervisorMaxIter: "Max macro-iterations (per message)",
   orchestrateSupervisorParticipantsHint:
     "List order is the run order A→B→C; remove and re-add to change order.",
@@ -342,6 +348,12 @@ const zhCN: Record<string, string> = {
   orchestrateStrategyRouter: "路由 LLM",
   orchestrateStrategyDag: "DAG",
   orchestrateStrategySupervisor: "监督流水线",
+  orchestrateReplyLanguage: "回复语言",
+  orchestrateReplyLanguageHint:
+    "控制本编排中助手对用户可见的输出语言。自动=跟随用户；简体/英文为强制。",
+  orchestrateReplyLanguageAuto: "自动（跟随用户）",
+  orchestrateReplyLanguageZh: "简体中文",
+  orchestrateReplyLanguageEn: "English",
   orchestrateSupervisorMaxIter: "最大宏迭代次数（每条消息）",
   orchestrateSupervisorParticipantsHint: "列表顺序即执行顺序 A→B→C；可删除后重新添加以调整顺序。",
   orchestrateSupervisorHint: "每一轮完整流水线结束后，由监督 LLM 决定继续再来一轮或结束。",
