@@ -33,9 +33,32 @@ from ..plugin import load_plugins
 from .state import DedupeEntry, GatewayState, RunSnapshot
 from .types import AgentEvent
 from .wait_timeout import resolve_agent_wait_timeout_ms
+from .orch_trace import read_trace_events
 from .orchestrator import Orchestrator
 
 logger = get_logger(__name__)
+
+
+def _param_bool_default(params: Dict[str, Any], camel: str, snake: str, *, default: bool) -> bool:
+    """Read optional bool from RPC params (camel or snake); missing key → ``default``."""
+    if camel in params:
+        v = params.get(camel)
+        return bool(v) if v is not None else default
+    if snake in params:
+        v = params.get(snake)
+        return bool(v) if v is not None else default
+    return default
+
+
+def _param_bool_optional(params: Dict[str, Any], camel: str, snake: str) -> Optional[bool]:
+    """If either key present, return coerced bool; else None (omit update)."""
+    if camel in params:
+        v = params.get(camel)
+        return bool(v) if v is not None else False
+    if snake in params:
+        v = params.get(snake)
+        return bool(v) if v is not None else False
+    return None
 
 
 def _now_ms() -> int:
@@ -112,6 +135,33 @@ def _resolve_agent_workspace_file_abs(
     target = (root / chosen).resolve()
     if root != target and root not in target.parents:
         raise ValueError("refusing to access path outside workspace")
+    return chosen, str(target)
+
+
+def _resolve_orchestration_workspace_file_abs(orch_id: str, rel_path: str) -> tuple[str, str]:
+    """Allowed root files under ``<state>/orchestrations/<orchId>/`` (team ``AGENTS.md``)."""
+    from ..config.paths import orchestration_state_dir
+
+    rel = (rel_path or "").strip().lstrip("/").replace("\\", "/")
+    allowed = {"AGENTS.md", "agents.md"}
+    if rel not in allowed:
+        raise ValueError(f"unsupported file: {rel!r}")
+    oid = (orch_id or "").strip()
+    if not oid:
+        raise ValueError("orchId is required")
+    root = Path(orchestration_state_dir(oid)).resolve()
+    candidates = ["AGENTS.md", "agents.md"] if rel == "AGENTS.md" else ["agents.md", "AGENTS.md"]
+    chosen = candidates[0]
+    for c in candidates:
+        p = (root / c).resolve()
+        if root != p and root not in p.parents:
+            continue
+        if p.is_file():
+            chosen = c
+            break
+    target = (root / chosen).resolve()
+    if root != target and root not in target.parents:
+        raise ValueError("refusing to access path outside orchestration directory")
     return chosen, str(target)
 
 
@@ -1157,6 +1207,60 @@ def create_app(
             except Exception as e:
                 return {"id": req_id, "ok": False, "error": {"code": "unavailable", "message": str(e)}}
 
+        if method == "orchestrate.workspace_file.read":
+            orch_id = str(params.get("orchId") or "").strip()
+            rel_path = str(params.get("path") or "").strip()
+            if not orch_id:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "orchId is required"}}
+            if not rel_path:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "path is required"}}
+            if not orchestrator.get(orch_id):
+                return {"id": req_id, "ok": False, "error": {"code": "not_found", "message": "orchestration not found"}}
+            try:
+                resolved_rel, abs_path = _resolve_orchestration_workspace_file_abs(orch_id, rel_path)
+                if not os.path.isfile(abs_path):
+                    return {"id": req_id, "ok": True, "payload": {"path": resolved_rel, "text": "", "missing": True}}
+                with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                return {"id": req_id, "ok": True, "payload": {"path": resolved_rel, "text": text, "missing": False}}
+            except ValueError as e:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": str(e)}}
+            except Exception as e:
+                return {"id": req_id, "ok": False, "error": {"code": "unavailable", "message": str(e)}}
+
+        if method == "orchestrate.workspace_file.write":
+            orch_id = str(params.get("orchId") or "").strip()
+            rel_path = str(params.get("path") or "").strip()
+            text = params.get("text")
+            if not orch_id:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "orchId is required"}}
+            if not rel_path:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "path is required"}}
+            if text is None:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "text is required"}}
+            st_orch = orchestrator.get(orch_id)
+            if not st_orch:
+                return {"id": req_id, "ok": False, "error": {"code": "not_found", "message": "orchestration not found"}}
+            if (st_orch.status or "").strip() == "running":
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "invalid_request", "message": "orchestration is running"},
+                }
+            try:
+                resolved_rel, abs_path = _resolve_orchestration_workspace_file_abs(orch_id, rel_path)
+                payload = str(text)
+                if len(payload) > 300_000:
+                    raise ValueError("text too large")
+                os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+                with open(abs_path, "w", encoding="utf-8") as f:
+                    f.write(payload)
+                return {"id": req_id, "ok": True, "payload": {"path": resolved_rel, "saved": True}}
+            except ValueError as e:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": str(e)}}
+            except Exception as e:
+                return {"id": req_id, "ok": False, "error": {"code": "unavailable", "message": str(e)}}
+
         if method == "orchestrate.run":
             message = str(params.get("message") or "").strip()
             session_key = str(params.get("sessionKey") or "orchestrator").strip() or "orchestrator"
@@ -1213,6 +1317,9 @@ def create_app(
             orch_reply_language_run = (
                 str(_orl_run).strip() if _orl_run is not None and str(_orl_run).strip() else None
             )
+            orch_trace_enabled_run = _param_bool_default(
+                params, "orchTraceEnabled", "orch_trace_enabled", default=False
+            )
             try:
                 st = orchestrator.create(
                     session_key=session_key,
@@ -1228,6 +1335,7 @@ def create_app(
                     supervisor_max_iterations=sup_run_max,
                     supervisor_llm_max_retries=sup_llm_retries_int,
                     orch_reply_language=orch_reply_language_run,
+                    orch_trace_enabled=orch_trace_enabled_run,
                 )
                 orchestrator.send(orch_id=st.orchId, message=message)
             except ValueError as e:
@@ -1295,6 +1403,9 @@ def create_app(
                 if _orl_create is not None and str(_orl_create).strip()
                 else None
             )
+            orch_trace_enabled_create = _param_bool_default(
+                params, "orchTraceEnabled", "orch_trace_enabled", default=False
+            )
             try:
                 st = orchestrator.create(
                     session_key=session_key,
@@ -1310,6 +1421,7 @@ def create_app(
                     supervisor_max_iterations=sup_max_int,
                     supervisor_llm_max_retries=sup_llm_retries_int,
                     orch_reply_language=orch_reply_language_create,
+                    orch_trace_enabled=orch_trace_enabled_create,
                 )
             except ValueError as e:
                 return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": str(e)}}
@@ -1377,6 +1489,9 @@ def create_app(
             orch_reply_language_update = (
                 str(_orl_upd).strip() if _orl_upd is not None and str(_orl_upd).strip() else None
             )
+            orch_trace_enabled_update = _param_bool_optional(
+                params, "orchTraceEnabled", "orch_trace_enabled"
+            )
             try:
                 st = orchestrator.update(
                     orch_id,
@@ -1393,6 +1508,7 @@ def create_app(
                     supervisor_max_iterations=sup_max_int,
                     supervisor_llm_max_retries=sup_llm_retries_int,
                     orch_reply_language=orch_reply_language_update,
+                    orch_trace_enabled=orch_trace_enabled_update,
                 )
             except ValueError as e:
                 return {
@@ -1427,9 +1543,39 @@ def create_app(
                         "updatedAt": st.updatedAt,
                         "error": st.error,
                         "orchReplyLanguage": getattr(st, "orchReplyLanguage", "auto"),
+                        "orchTraceEnabled": bool(getattr(st, "orchTraceEnabled", False)),
                     }
                 )
             return {"id": req_id, "ok": True, "payload": {"orchestrations": items}}
+
+        if method == "orchestrate.trace.list":
+            orch_id = str(params.get("orchId") or params.get("orch_id") or "").strip()
+            if not orch_id:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "invalid_request", "message": "orchId is required"},
+                }
+            after_raw = params.get("afterSeq") if "afterSeq" in params else params.get("after_seq")
+            try:
+                if after_raw is not None and str(after_raw).strip() != "":
+                    after_seq = int(after_raw)
+                else:
+                    after_seq = -1
+            except (TypeError, ValueError):
+                after_seq = -1
+            lim_raw = params.get("limit")
+            try:
+                limit = int(lim_raw) if lim_raw is not None and str(lim_raw).strip() else 200
+            except (TypeError, ValueError):
+                limit = 200
+            limit = max(1, min(2000, limit))
+            events = read_trace_events(orch_id, after_seq=after_seq, limit=limit)
+            return {
+                "id": req_id,
+                "ok": True,
+                "payload": {"orchId": orch_id, "events": events},
+            }
 
         if method == "orchestrate.delete":
             orch_id = str(params.get("orchId") or "").strip()
@@ -1498,6 +1644,8 @@ def create_app(
                 "supervisorLlm": supervisor_public,
                 "supervisorApiKeyConfigured": supervisor_key_configured,
                 "orchReplyLanguage": getattr(st, "orchReplyLanguage", "auto"),
+                "orchTraceEnabled": bool(getattr(st, "orchTraceEnabled", False)),
+                "orchTraceSeq": int(getattr(st, "orchTraceSeq", 0) or 0),
             }
             return {"id": req_id, "ok": True, "payload": payload}
 

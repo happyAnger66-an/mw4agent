@@ -8,11 +8,12 @@ import { useI18n } from "@/lib/i18n";
 import { AgentsPanel } from "@/components/AgentsPanel";
 import { ChatPanel } from "@/components/ChatPanel";
 import { OrchestratePanel } from "@/components/OrchestratePanel";
+import { TracePanel } from "@/components/TracePanel";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { SkillsPanel } from "@/components/SkillsPanel";
 import { StatsPanel } from "@/components/StatsPanel";
 
-type MainView = "home" | "agents" | "skills" | "orchestrate" | "stats" | "settings";
+type MainView = "home" | "agents" | "skills" | "orchestrate" | "trace" | "stats" | "settings";
 
 export function AppShell() {
   const { t, locale, setLocale } = useI18n();
@@ -118,6 +119,27 @@ export function AppShell() {
               className="h-5 w-5 shrink-0 object-contain opacity-90"
             />
             {t("orchestrateNav")}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setMainView("trace");
+              setChatOpen(false);
+            }}
+            className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-colors ${
+              mainView === "trace" && !chatOpen
+                ? "bg-[var(--accent)] text-white"
+                : "text-[var(--text)] hover:bg-[var(--bg)]/80"
+            }`}
+          >
+            <Image
+              src="/icons/trace.png"
+              alt=""
+              width={20}
+              height={20}
+              className="h-5 w-5 shrink-0 object-contain opacity-90"
+            />
+            {t("traceNav")}
           </button>
           <button
             type="button"
@@ -270,6 +292,8 @@ export function AppShell() {
           <AgentsPanel onOpenChatWithAgent={openChatWithAgent} />
         ) : mainView === "orchestrate" ? (
           <OrchestratePanel autoOpenKey={orchOpenKey} />
+        ) : mainView === "trace" ? (
+          <TracePanel />
         ) : mainView === "stats" ? (
           <StatsPanel />
         ) : mainView === "settings" ? (

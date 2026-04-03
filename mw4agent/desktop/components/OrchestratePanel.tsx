@@ -20,6 +20,8 @@ import {
   orchestrateList,
   orchestrateSend,
   orchestrateUpdate,
+  readOrchestrateWorkspaceFile,
+  writeOrchestrateWorkspaceFile,
   testLlmConnection,
   type ListedAgent,
   type AgentWsEvent,
@@ -200,6 +202,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
   >("round_robin");
   const [createOrchReplyLanguage, setCreateOrchReplyLanguage] =
     useState<OrchestrateReplyLanguage>("auto");
+  const [createOrchTraceEnabled, setCreateOrchTraceEnabled] = useState(false);
   const [createDagSpec, setCreateDagSpec] = useState<OrchestrateDagSpec>(DEFAULT_DAG_SPEC);
   const [createDagJson, setCreateDagJson] = useState(() =>
     JSON.stringify(DEFAULT_DAG_SPEC, null, 2)
@@ -239,6 +242,10 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
 
   const [input, setInput] = useState("");
   const [streamReasoning, setStreamReasoning] = useState(true);
+  const [orchAgentsMdOpen, setOrchAgentsMdOpen] = useState(false);
+  const [orchAgentsMdText, setOrchAgentsMdText] = useState("");
+  const [orchAgentsMdDirty, setOrchAgentsMdDirty] = useState(false);
+  const [orchAgentsMdSaving, setOrchAgentsMdSaving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [live, setLive] = useState<LiveRun | null>(null);
   const messagesWrapRef = useRef<HTMLDivElement | null>(null);
@@ -433,11 +440,49 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
 
   const canSend = useMemo(() => input.trim().length > 0 && Boolean(selectedOrchId), [input, selectedOrchId]);
 
+  const saveOrchAgentsMd = useCallback(async () => {
+    const id = selectedOrchId.trim();
+    if (!id || busy) return;
+    setOrchAgentsMdSaving(true);
+    setError(null);
+    const r = await writeOrchestrateWorkspaceFile(id, "AGENTS.md", orchAgentsMdText);
+    setOrchAgentsMdSaving(false);
+    if (!r.ok) {
+      setError(r.error || t("orchestrateError"));
+      return;
+    }
+    setOrchAgentsMdDirty(false);
+  }, [selectedOrchId, busy, orchAgentsMdText, t]);
+
   const lastListRefreshRef = useRef(0);
 
   useEffect(() => {
     setBusy(false);
     setLive(null);
+  }, [selectedOrchId]);
+
+  useEffect(() => {
+    const orchId = selectedOrchId.trim();
+    if (!orchId) {
+      setOrchAgentsMdText("");
+      setOrchAgentsMdDirty(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const r = await readOrchestrateWorkspaceFile(orchId, "AGENTS.md");
+      if (cancelled) return;
+      if (!r.ok) {
+        setOrchAgentsMdText("");
+        setOrchAgentsMdDirty(false);
+        return;
+      }
+      setOrchAgentsMdText(r.missing ? "" : r.text);
+      setOrchAgentsMdDirty(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [selectedOrchId]);
 
   useEffect(() => {
@@ -632,6 +677,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     setCreateSupervisorMaxIter("5");
     setCreateSupervisorLlmMaxRetries("12");
     setCreateOrchReplyLanguage("auto");
+    setCreateOrchTraceEnabled(false);
     setRouterLlmTestBanner(null);
     setRouterLlmTestLoading(false);
     setSupervisorLlmTestBanner(null);
@@ -811,6 +857,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
           ? r.orchReplyLanguage
           : "auto"
       );
+      setCreateOrchTraceEnabled(Boolean(r.orchTraceEnabled));
       setOrchFormOpen(true);
     },
     [t]
@@ -922,6 +969,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
             ? Math.min(64, Math.floor(supLlmRetries))
             : undefined,
         orchReplyLanguage: createOrchReplyLanguage,
+        orchTraceEnabled: createOrchTraceEnabled,
         idempotencyKey: idem,
       });
       if (!res.ok) {
@@ -956,6 +1004,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
           ? Math.min(64, Math.floor(supLlmRetries))
           : undefined,
       orchReplyLanguage: createOrchReplyLanguage,
+      orchTraceEnabled: createOrchTraceEnabled,
       idempotencyKey: idem,
     });
     if (!res.ok) {
@@ -970,6 +1019,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     createMaxRounds,
     createName,
     createOrchReplyLanguage,
+    createOrchTraceEnabled,
     createParticipants,
     createStrategy,
     loadOrches,
@@ -1372,6 +1422,48 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
             <div ref={messagesEndRef} />
           </div>
 
+          {selectedOrchId ? (
+            <div className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--panel)] overflow-hidden">
+              <button
+                type="button"
+                className="w-full text-left px-3 py-2 text-xs font-medium flex items-center justify-between gap-2 hover:bg-[var(--bg)]/80"
+                onClick={() => setOrchAgentsMdOpen((v) => !v)}
+              >
+                <span>{t("orchestrateAgentsMd")}</span>
+                <span className="text-[var(--muted)] shrink-0">
+                  {orchAgentsMdOpen ? t("orchestrateAgentsMdCollapse") : t("orchestrateAgentsMdExpand")}
+                </span>
+              </button>
+              {orchAgentsMdOpen ? (
+                <div className="px-3 pb-3 pt-0 border-t border-[var(--border)] space-y-2">
+                  <p className="text-[10px] text-[var(--muted)] leading-relaxed pt-2">
+                    {t("orchestrateAgentsMdHint")}
+                  </p>
+                  <textarea
+                    className="w-full min-h-[140px] max-h-[40vh] text-xs font-mono px-2 py-2 rounded-md border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] resize-y"
+                    value={orchAgentsMdText}
+                    onChange={(e) => {
+                      setOrchAgentsMdText(e.target.value);
+                      setOrchAgentsMdDirty(true);
+                    }}
+                    disabled={busy}
+                    spellCheck={false}
+                  />
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs disabled:opacity-50"
+                      disabled={!orchAgentsMdDirty || busy || orchAgentsMdSaving}
+                      onClick={() => void saveOrchAgentsMd()}
+                    >
+                      {orchAgentsMdSaving ? t("orchestrateAgentsMdSaving") : t("orchestrateAgentsMdSave")}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="mt-3 flex gap-2 items-stretch">
             <OrchestrateMentionInput
               value={input}
@@ -1520,6 +1612,21 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
                 <p className="text-[10px] text-[var(--muted)] leading-relaxed">
                   {t("orchestrateReplyLanguageHint")}
                 </p>
+              </label>
+
+              <label className="flex items-start gap-2 cursor-pointer py-1">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={createOrchTraceEnabled}
+                  onChange={(e) => setCreateOrchTraceEnabled(e.target.checked)}
+                />
+                <span className="flex flex-col gap-0.5 min-w-0">
+                  <span className="text-[var(--muted)] text-xs">{t("orchestrateTraceEnabled")}</span>
+                  <span className="text-[10px] text-[var(--muted)] leading-relaxed">
+                    {t("orchestrateTraceEnabledHint")}
+                  </span>
+                </span>
               </label>
 
               {createStrategy === "dag" ? (

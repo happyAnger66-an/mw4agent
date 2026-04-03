@@ -563,6 +563,54 @@ export async function writeAgentWorkspaceFile(
   };
 }
 
+/** Team ``AGENTS.md`` at orchestration root; path allowlist matches gateway. */
+export type ReadOrchestrateWorkspaceFileResult =
+  | { ok: true; path: string; text: string; missing: boolean }
+  | { ok: false; error?: string };
+
+export async function readOrchestrateWorkspaceFile(
+  orchId: string,
+  path: string
+): Promise<ReadOrchestrateWorkspaceFileResult> {
+  const r = await callRpc("orchestrate.workspace_file.read", {
+    orchId: orchId.trim(),
+    path: path.trim(),
+  });
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "orchestrate.workspace_file.read failed" };
+  }
+  return {
+    ok: true,
+    path: String(r.payload.path ?? path),
+    text: String(r.payload.text ?? ""),
+    missing: Boolean(r.payload.missing),
+  };
+}
+
+export type WriteOrchestrateWorkspaceFileResult =
+  | { ok: true; path: string; saved: boolean }
+  | { ok: false; error?: string };
+
+export async function writeOrchestrateWorkspaceFile(
+  orchId: string,
+  path: string,
+  text: string
+): Promise<WriteOrchestrateWorkspaceFileResult> {
+  const r = await callRpc("orchestrate.workspace_file.write", {
+    orchId: orchId.trim(),
+    path: path.trim(),
+    text,
+  });
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "orchestrate.workspace_file.write failed" };
+  }
+  return {
+    ok: true,
+    path: String(r.payload.path ?? path),
+    saved: Boolean(r.payload.saved),
+  };
+}
+
 export type ListLlmProvidersResult =
   | { ok: true; providers: string[] }
   | { ok: false; error?: string };
@@ -662,6 +710,8 @@ export type OrchestrateRunBody = {
   supervisorLlmMaxRetries?: number;
   /** ``auto`` = follow user language; ``zh`` / ``en`` = force. */
   orchReplyLanguage?: OrchestrateReplyLanguage;
+  /** Persist tool/LLM trace to ``trace.jsonl`` when true. */
+  orchTraceEnabled?: boolean;
   idempotencyKey: string;
 };
 
@@ -687,6 +737,7 @@ export async function orchestrateRun(
     supervisorMaxIterations: body.supervisorMaxIterations,
     supervisorLlmMaxRetries: body.supervisorLlmMaxRetries,
     ...(body.orchReplyLanguage != null ? { orchReplyLanguage: body.orchReplyLanguage } : {}),
+    ...(body.orchTraceEnabled === true ? { orchTraceEnabled: true } : {}),
     idempotencyKey: body.idempotencyKey,
   });
   if (!r.ok || !r.payload) {
@@ -728,6 +779,7 @@ export type OrchestrateCreateBody = {
   /** Retries after a failed/empty supervisor HTTP call; 10s between attempts. */
   supervisorLlmMaxRetries?: number;
   orchReplyLanguage?: OrchestrateReplyLanguage;
+  orchTraceEnabled?: boolean;
   idempotencyKey: string;
 };
 
@@ -752,6 +804,7 @@ export async function orchestrateCreate(
     supervisorMaxIterations: body.supervisorMaxIterations,
     supervisorLlmMaxRetries: body.supervisorLlmMaxRetries,
     ...(body.orchReplyLanguage != null ? { orchReplyLanguage: body.orchReplyLanguage } : {}),
+    ...(body.orchTraceEnabled === true ? { orchTraceEnabled: true } : {}),
     idempotencyKey: body.idempotencyKey,
   });
   if (!r.ok || !r.payload) {
@@ -789,6 +842,7 @@ export async function orchestrateUpdate(
     supervisorMaxIterations: body.supervisorMaxIterations,
     supervisorLlmMaxRetries: body.supervisorLlmMaxRetries,
     ...(body.orchReplyLanguage != null ? { orchReplyLanguage: body.orchReplyLanguage } : {}),
+    ...(body.orchTraceEnabled != null ? { orchTraceEnabled: body.orchTraceEnabled } : {}),
     idempotencyKey: body.idempotencyKey,
   });
   if (!r.ok || !r.payload) {
@@ -815,6 +869,7 @@ export type OrchestrateListItem = {
   updatedAt?: number;
   error?: string;
   orchReplyLanguage?: OrchestrateReplyLanguage;
+  orchTraceEnabled?: boolean;
 };
 
 export type OrchestrateListResult =
@@ -883,6 +938,8 @@ export type OrchestrateGetResult =
       supervisorLlm?: OrchestrateRouterLlmPublic | null;
       supervisorApiKeyConfigured?: boolean;
       orchReplyLanguage?: OrchestrateReplyLanguage;
+      orchTraceEnabled?: boolean;
+      orchTraceSeq?: number;
     }
   | { ok: false; error?: string };
 
@@ -956,6 +1013,38 @@ export async function orchestrateGet(orchId: string): Promise<OrchestrateGetResu
       if (s === "zh" || s === "en" || s === "auto") return s as OrchestrateReplyLanguage;
       return undefined;
     })(),
+    orchTraceEnabled: Boolean(p.orchTraceEnabled),
+    orchTraceSeq: typeof p.orchTraceSeq === "number" ? p.orchTraceSeq : Number(p.orchTraceSeq ?? 0) || 0,
+  };
+}
+
+/** One JSONL row from ``orchestrate.trace.list`` / ``trace.jsonl``. */
+export type OrchTraceEvent = Record<string, unknown>;
+
+export type OrchestrateTraceListResult =
+  | { ok: true; orchId: string; events: OrchTraceEvent[] }
+  | { ok: false; error?: string };
+
+export async function orchestrateTraceList(
+  orchId: string,
+  afterSeq: number,
+  limit = 200
+): Promise<OrchestrateTraceListResult> {
+  const a = Math.floor(afterSeq);
+  const afterSeqRpc = Number.isFinite(a) ? a : -1;
+  const r = await callRpc("orchestrate.trace.list", {
+    orchId: orchId.trim(),
+    afterSeq: afterSeqRpc,
+    limit: Math.max(1, Math.min(2000, Math.floor(limit))),
+  });
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "orchestrate.trace.list failed" };
+  }
+  const ev = r.payload.events;
+  return {
+    ok: true,
+    orchId: String(r.payload.orchId ?? orchId),
+    events: Array.isArray(ev) ? (ev as OrchTraceEvent[]) : [],
   };
 }
 

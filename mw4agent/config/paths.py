@@ -89,6 +89,14 @@ def orchestrations_root_dir() -> str:
     return os.path.join(get_state_dir(), "orchestrations")
 
 
+def orchestration_state_dir(orch_id: str) -> str:
+    """Single orchestration directory: ``<state>/orchestrations/<orchId>`` (``orch.json``, team ``AGENTS.md``, …)."""
+    oid = (orch_id or "").strip()
+    if not oid:
+        raise ValueError("orch_id is required")
+    return os.path.join(orchestrations_root_dir(), oid)
+
+
 def resolve_orchestration_agent_workspace_dir(orch_id: str, agent_id: Optional[str]) -> str:
     """Per-orchestration per-agent workspace (MEMORY.md, tools cwd, memory index scope).
 

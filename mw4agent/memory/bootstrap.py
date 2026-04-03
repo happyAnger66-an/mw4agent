@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from .search import BOOTSTRAP_ORDER_FOR_PROMPT
 
@@ -47,6 +47,41 @@ def load_bootstrap_for_orchestration(
     )
     parts = [p for p in (identity, memory) if p.strip()]
     return "\n\n".join(parts)
+
+
+def load_orchestration_team_agents_appendix(
+    orch_root_dir: str,
+    *,
+    max_chars_per_file: int = DEFAULT_MAX_CHARS_PER_FILE,
+) -> str:
+    """Team-level ``AGENTS.md`` at orchestration root, appended last to ``extra_system_prompt``.
+
+    File: ``<orchestrations>/<orchId>/AGENTS.md`` (or ``agents.md`` if that is the only existing file).
+    """
+    root = os.path.normpath(os.path.abspath(orch_root_dir))
+    candidates = ("AGENTS.md", "agents.md")
+    chosen: Optional[str] = None
+    for name in candidates:
+        path = os.path.join(root, name)
+        if os.path.isfile(path):
+            chosen = name
+            break
+    if not chosen:
+        return ""
+    path = os.path.join(root, chosen)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+    except OSError:
+        return ""
+    if len(raw) > max_chars_per_file:
+        raw = raw[:max_chars_per_file] + "\n\n[... truncated ...]"
+    if not raw.strip():
+        return ""
+    return (
+        "<!-- orchestration AGENTS.md (team workflow / constraints; appended after orchestration hint) -->\n"
+        f"{raw.strip()}"
+    )
 
 
 def load_bootstrap_system_prompt(

@@ -14,12 +14,17 @@ from typing import Any, Dict, List, Optional
 
 from ..agents.agent_manager import AgentManager
 from ..agents.runner.runner import AgentRunner
-from ..agents.types import AgentRunParams
+from ..agents.types import AgentRunParams, AgentRunResult
 from ..config.paths import get_state_dir, normalize_agent_id, resolve_orchestration_agent_workspace_dir
 from ..llm.backends import _call_openai_chat, _thinking_extra_body, list_providers  # type: ignore
-from ..memory.bootstrap import load_bootstrap_for_orchestration
+from ..memory.bootstrap import load_bootstrap_for_orchestration, load_orchestration_team_agents_appendix
 
 from .dag_spec import MAX_UPSTREAM_SNIPPET, normalize_dag_dict
+from .orch_trace import (
+    build_stream_trace_handler,
+    flush_run_trace,
+    record_user_message_trace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +84,15 @@ def _orchestrations_root_dir() -> str:
 
 def _orch_dir(orch_id: str) -> str:
     return os.path.join(_orchestrations_root_dir(), orch_id)
+
+
+def _orch_extra_system_prompt(orch_id: str, *, bootstrap: str, orch_hint: str) -> str:
+    """Bootstrap + orchestration hint + team ``AGENTS.md`` (last, for workflow/constraints)."""
+    base = f"{bootstrap}\n\n{orch_hint}".strip() if (bootstrap or "").strip() else orch_hint
+    tail = load_orchestration_team_agents_appendix(_orch_dir(orch_id))
+    if not tail.strip():
+        return base
+    return f"{base}\n\n{tail}".strip()
 
 
 def _orch_state_path(orch_id: str) -> str:
@@ -147,6 +161,9 @@ class OrchState:
     supervisorLlmMaxRetries: int = 12
     supervisorIteration: int = 0
     supervisorLastDecision: Optional[Dict[str, Any]] = None
+    # When True, append JSONL trace (inputs, tools, LLM rounds, outputs) under orchestrations/<id>/trace.jsonl
+    orchTraceEnabled: bool = False
+    orchTraceSeq: int = 0  # next seq for trace.jsonl rows
 
 
 def _truncate_text(s: str, max_len: int) -> str:
@@ -417,6 +434,62 @@ class Orchestrator:
             n += 1
         return n
 
+    async def _runner_execute_orch_turn(
+        self,
+        orch_id: str,
+        *,
+        agent_id: str,
+        orch_round: int,
+        agent_message: str,
+        params: AgentRunParams,
+        dag_node_id: str = "",
+    ) -> AgentRunResult:
+        """Run agent; optionally record trace via ``EventStream`` subscription (scheme A)."""
+        st = self._load(orch_id)
+        if not st or not bool(getattr(st, "orchTraceEnabled", False)):
+            return await self.runner.run(params)
+        run_id = params.run_id or str(uuid.uuid4())
+        params.run_id = run_id
+        buf: List[Dict[str, Any]] = []
+        h = build_stream_trace_handler(
+            run_id=run_id,
+            agent_id=agent_id,
+            orch_id=orch_id,
+            orch_round=orch_round,
+            buffer=buf,
+            node_id=dag_node_id,
+        )
+        es = self.runner.event_stream
+        es.subscribe("lifecycle", h)
+        es.subscribe("tool", h)
+        es.subscribe("llm", h)
+        try:
+            result = await self.runner.run(params)
+        finally:
+            es.unsubscribe("lifecycle", h)
+            es.unsubscribe("tool", h)
+            es.unsubscribe("llm", h)
+        st2 = self._load(orch_id)
+        if not st2:
+            return result
+        next_seq = int(getattr(st2, "orchTraceSeq", 0) or 0)
+        out_text = "\n".join([p.text or "" for p in result.payloads if (p.text or "").strip()]).strip()
+        if not out_text:
+            out_text = "(no output)"
+        st2.orchTraceSeq = flush_run_trace(
+            orch_id,
+            agent_id=agent_id,
+            orch_round=orch_round,
+            run_id=run_id,
+            agent_message=agent_message,
+            assistant_text=out_text,
+            stream_buffer=buf,
+            next_seq=next_seq,
+            node_id=dag_node_id,
+        )
+        self._save(st2)
+        return result
+
     @staticmethod
     def _patch_router_llm(
         old: Optional[Dict[str, str]], patch: Optional[Dict[str, str]]
@@ -575,6 +648,13 @@ class Orchestrator:
             s_iter = 0
         s_last = data.get("supervisorLastDecision") or data.get("supervisor_last_decision")
         s_decision: Optional[Dict[str, Any]] = dict(s_last) if isinstance(s_last, dict) else None
+        ot_raw = data.get("orchTraceEnabled") if "orchTraceEnabled" in data else data.get("orch_trace_enabled")
+        orch_trace_on = ot_raw is True or str(ot_raw).lower() in ("1", "true", "yes")
+        try:
+            ots = int(data.get("orchTraceSeq") or data.get("orch_trace_seq") or 0)
+        except (TypeError, ValueError):
+            ots = 0
+        ots = max(0, ots)
         rar_raw = data.get("routerAgentRoles") or data.get("router_agent_roles")
         router_agent_roles_loaded: Optional[Dict[str, str]] = None
         if isinstance(rar_raw, dict) and rar_raw:
@@ -616,6 +696,8 @@ class Orchestrator:
             supervisorLlmMaxRetries=smr,
             supervisorIteration=s_iter,
             supervisorLastDecision=s_decision,
+            orchTraceEnabled=orch_trace_on,
+            orchTraceSeq=ots,
         )
 
     def get(self, orch_id: str) -> Optional[OrchState]:
@@ -672,6 +754,7 @@ class Orchestrator:
         supervisor_max_iterations: Optional[int] = None,
         supervisor_llm_max_retries: Optional[int] = None,
         orch_reply_language: Optional[str] = None,
+        orch_trace_enabled: bool = False,
     ) -> OrchState:
         orch_id = str(uuid.uuid4())
         strat = (strategy or "round_robin").strip() or "round_robin"
@@ -766,6 +849,8 @@ class Orchestrator:
             supervisorIteration=0,
             supervisorLastDecision=None,
             orchReplyLanguage=_normalize_orch_reply_language(orch_reply_language),
+            orchTraceEnabled=bool(orch_trace_enabled),
+            orchTraceSeq=0,
         )
         if dag is not None:
             st.supervisorPipeline = []
@@ -792,6 +877,7 @@ class Orchestrator:
         supervisor_max_iterations: Optional[int] = None,
         supervisor_llm_max_retries: Optional[int] = None,
         orch_reply_language: Optional[str] = None,
+        orch_trace_enabled: Optional[bool] = None,
     ) -> OrchState:
         """Update orchestration metadata. Refuses when ``status == running``."""
         oid = (orch_id or "").strip()
@@ -919,6 +1005,8 @@ class Orchestrator:
         st.pendingSingleTurn = False
         if orch_reply_language is not None:
             st.orchReplyLanguage = _normalize_orch_reply_language(orch_reply_language)
+        if orch_trace_enabled is not None:
+            st.orchTraceEnabled = bool(orch_trace_enabled)
         self._save(st)
         return st
 
@@ -934,6 +1022,7 @@ class Orchestrator:
         router_agent_roles: Optional[Dict[str, Any]] = None,
         dag: Optional[Dict[str, Any]] = None,
         orch_reply_language: Optional[str] = None,
+        orch_trace_enabled: bool = False,
     ) -> OrchState:
         # Back-compat: create + send
         st = self.create(
@@ -946,6 +1035,7 @@ class Orchestrator:
             router_agent_roles=router_agent_roles,
             dag=dag,
             orch_reply_language=orch_reply_language,
+            orch_trace_enabled=orch_trace_enabled,
         )
         self.send(orch_id=st.orchId, message=message)
         return self._load(st.orchId) or st
@@ -1000,6 +1090,13 @@ class Orchestrator:
                 text=text,
             )
         )
+        if bool(getattr(st, "orchTraceEnabled", False)):
+            st.orchTraceSeq = record_user_message_trace(
+                st.orchId,
+                orch_round=st.currentRound,
+                text=text,
+                next_seq=int(getattr(st, "orchTraceSeq", 0) or 0),
+            )
         self._save(st)
         self._start_background(st.orchId)
         return st
@@ -1112,7 +1209,9 @@ class Orchestrator:
                             "Reply concisely, and include actionable outputs.\n"
                         )
                     ) + _orch_language_block(st.orchReplyLanguage)
-                    extra_system_prompt = f"{bootstrap}\n\n{orch_hint}".strip() if bootstrap else orch_hint
+                    extra_system_prompt = _orch_extra_system_prompt(
+                        orch_id, bootstrap=bootstrap, orch_hint=orch_hint
+                    )
 
                     if r == start_round and st.messages and st.messages[-1].role == "user":
                         raw_u = st.messages[-1].text
@@ -1132,19 +1231,24 @@ class Orchestrator:
                     else:
                         agent_message = last_text
 
-                    result = await self.runner.run(
-                        AgentRunParams(
-                            message=agent_message,
-                            run_id=str(uuid.uuid4()),
-                            session_key=f"orch:{orch_id}",
-                            session_id=session_id,
-                            agent_id=agent_id,
-                            channel="orchestrator",
-                            deliver=False,
-                            extra_system_prompt=extra_system_prompt,
-                            workspace_dir=workspace_dir,
-                            reasoning_level=self._reasoning_level_for_orch(st),
-                        )
+                    arp = AgentRunParams(
+                        message=agent_message,
+                        run_id=str(uuid.uuid4()),
+                        session_key=f"orch:{orch_id}",
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        channel="orchestrator",
+                        deliver=False,
+                        extra_system_prompt=extra_system_prompt,
+                        workspace_dir=workspace_dir,
+                        reasoning_level=self._reasoning_level_for_orch(st),
+                    )
+                    result = await self._runner_execute_orch_turn(
+                        orch_id,
+                        agent_id=agent_id,
+                        orch_round=r + 1,
+                        agent_message=agent_message,
+                        params=arp,
                     )
                     out_text = "\n".join([p.text or "" for p in result.payloads if (p.text or "").strip()]).strip()
                     if not out_text:
@@ -1332,26 +1436,33 @@ class Orchestrator:
                         "You are part of a multi-agent supervisor pipeline orchestration.\n"
                         "Reply concisely, and include actionable outputs.\n"
                     ) + _orch_language_block(st.orchReplyLanguage)
-                    extra_system_prompt = f"{bootstrap}\n\n{orch_hint}".strip() if bootstrap else orch_hint
+                    extra_system_prompt = _orch_extra_system_prompt(
+                        orch_id, bootstrap=bootstrap, orch_hint=orch_hint
+                    )
                     if agent_id == pipeline[0]:
                         agent_message = _strip_at_mentions(last_text)
                         if not agent_message.strip():
                             agent_message = last_text
                     else:
                         agent_message = last_text
-                    result = await self.runner.run(
-                        AgentRunParams(
-                            message=agent_message,
-                            run_id=str(uuid.uuid4()),
-                            session_key=f"orch:{orch_id}",
-                            session_id=session_id,
-                            agent_id=agent_id,
-                            channel="orchestrator",
-                            deliver=False,
-                            extra_system_prompt=extra_system_prompt,
-                            workspace_dir=workspace_dir,
-                            reasoning_level=self._reasoning_level_for_orch(st),
-                        )
+                    arp_sup = AgentRunParams(
+                        message=agent_message,
+                        run_id=str(uuid.uuid4()),
+                        session_key=f"orch:{orch_id}",
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        channel="orchestrator",
+                        deliver=False,
+                        extra_system_prompt=extra_system_prompt,
+                        workspace_dir=workspace_dir,
+                        reasoning_level=self._reasoning_level_for_orch(st),
+                    )
+                    result = await self._runner_execute_orch_turn(
+                        orch_id,
+                        agent_id=agent_id,
+                        orch_round=next_r,
+                        agent_message=agent_message,
+                        params=arp_sup,
                     )
                     out_text = "\n".join([p.text or "" for p in result.payloads if (p.text or "").strip()]).strip()
                     if not out_text:
@@ -1458,6 +1569,7 @@ class Orchestrator:
         node: Dict[str, Any],
         orig_user_message: str,
         outputs: Dict[str, str],
+        dag_round: int = 0,
     ) -> str:
         """Execute one DAG node; returns assistant text (may raise)."""
         agent_id = normalize_agent_id(str(node.get("agentId") or "main"))
@@ -1484,21 +1596,29 @@ class Orchestrator:
             "You are part of a multi-agent DAG orchestration.\n"
             f"Current node id: {nid!r}. Reply concisely with actionable output.\n"
         ) + _orch_language_block(st.orchReplyLanguage)
-        extra_system_prompt = f"{bootstrap}\n\n{orch_hint}".strip() if bootstrap else orch_hint
+        extra_system_prompt = _orch_extra_system_prompt(
+            orch_id, bootstrap=bootstrap, orch_hint=orch_hint
+        )
 
-        result = await self.runner.run(
-            AgentRunParams(
-                message=full_message,
-                run_id=str(uuid.uuid4()),
-                session_key=f"orch:{orch_id}",
-                session_id=session_id,
-                agent_id=agent_id,
-                channel="orchestrator",
-                deliver=False,
-                extra_system_prompt=extra_system_prompt,
-                workspace_dir=workspace_dir,
-                reasoning_level=rl,
-            )
+        arp_dag = AgentRunParams(
+            message=full_message,
+            run_id=str(uuid.uuid4()),
+            session_key=f"orch:{orch_id}",
+            session_id=session_id,
+            agent_id=agent_id,
+            channel="orchestrator",
+            deliver=False,
+            extra_system_prompt=extra_system_prompt,
+            workspace_dir=workspace_dir,
+            reasoning_level=rl,
+        )
+        result = await self._runner_execute_orch_turn(
+            orch_id,
+            agent_id=agent_id,
+            orch_round=int(dag_round or 0),
+            agent_message=full_message,
+            params=arp_dag,
+            dag_node_id=nid,
         )
         out_text = "\n".join([p.text or "" for p in result.payloads if (p.text or "").strip()]).strip()
         if not out_text:
@@ -1570,6 +1690,7 @@ class Orchestrator:
                                 node=nodes_by_id[nid],
                                 orig_user_message=orig_user_message,
                                 outputs=outputs,
+                                dag_round=wave,
                             )
                             return nid, text, None
                         except Exception as ex:
