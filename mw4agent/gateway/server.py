@@ -1590,6 +1590,8 @@ def create_app(
         if method == "llm.test":
             try:
                 from ..config.paths import normalize_agent_id
+                from ..config.redact import is_redacted_placeholder
+                from ..config.root import read_root_section
                 from ..llm.backends import test_llm_connection
             except Exception as e:
                 return {
@@ -1602,12 +1604,18 @@ def create_app(
             aid = str(params.get("agentId") or "").strip()
             if aid:
                 ak = str(llm.get("api_key") or llm.get("apiKey") or "").strip()
-                if not ak:
+                if not ak or is_redacted_placeholder(ak):
                     cfg_existing = agent_manager.get(normalize_agent_id(aid))
                     if cfg_existing and cfg_existing.llm:
                         sk = str(cfg_existing.llm.get("api_key") or "").strip()
-                        if sk:
+                        if sk and not is_redacted_placeholder(sk):
                             llm = {**llm, "api_key": sk}
+            ak2 = str(llm.get("api_key") or llm.get("apiKey") or "").strip()
+            if not ak2 or is_redacted_placeholder(ak2):
+                sec_llm = read_root_section("llm")
+                rk = str(sec_llm.get("api_key") or "").strip()
+                if rk and not is_redacted_placeholder(rk):
+                    llm = {**llm, "api_key": rk}
             try:
                 result = test_llm_connection(llm)
             except Exception as e:
@@ -1699,6 +1707,7 @@ def create_app(
         if method == "config.get":
             # Return full root config (~/.mw4agent/mw4agent.json) for dashboard inspection.
             try:
+                from ..config.redact import redact_secrets
                 from ..config.root import get_root_config_path, read_root_config
 
                 cfg = read_root_config()
@@ -1714,7 +1723,7 @@ def create_app(
                 "ok": True,
                 "payload": {
                     "path": path,
-                    "config": cfg,
+                    "config": redact_secrets(cfg),
                 },
             }
 
@@ -1738,6 +1747,7 @@ def create_app(
             if not section:
                 return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "section required"}}
             try:
+                from ..config.redact import redact_secrets
                 from ..config.root import read_root_config
 
                 cfg = read_root_config()
@@ -1747,7 +1757,14 @@ def create_app(
                     "ok": False,
                     "error": {"code": "unavailable", "message": f"failed to read root config: {e}"},
                 }
-            return {"id": req_id, "ok": True, "payload": {"section": section, "value": cfg.get(section)}}
+            raw = cfg.get(section)
+            if isinstance(raw, dict):
+                safe = redact_secrets(raw)
+            elif isinstance(raw, list):
+                safe = redact_secrets(raw)
+            else:
+                safe = raw
+            return {"id": req_id, "ok": True, "payload": {"section": section, "value": safe}}
 
         if method == "config.section.set":
             section = str(params.get("section") or "").strip()
@@ -1759,9 +1776,12 @@ def create_app(
             if not isinstance(value, dict):
                 return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "value must be an object"}}
             try:
-                from ..config.root import write_root_section
+                from ..config.redact import merge_preserve_redacted_secrets
+                from ..config.root import read_root_section, write_root_section
 
-                write_root_section(section, value)
+                old_sec = read_root_section(section)
+                merged = merge_preserve_redacted_secrets(old_sec, value)
+                write_root_section(section, merged)
             except Exception as e:
                 return {
                     "id": req_id,

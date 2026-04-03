@@ -398,6 +398,8 @@ export function SettingsPanel() {
           <div className="space-y-1">
             <div className="text-[10px] text-[var(--muted)]">{t("settingsLlmApiKey")}</div>
             <input
+              type="password"
+              autoComplete="off"
               className="w-full px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-xs font-mono"
               value={apiKey}
               onChange={(e) => updateSection((cur) => ({ ...cur, api_key: e.target.value }))}
@@ -752,6 +754,8 @@ export function SettingsPanel() {
                 <div className="space-y-1">
                   <div className="text-[10px] text-[var(--muted)]">{t("settingsChannelsFeishuAppSecret")}</div>
                   <input
+                    type="password"
+                    autoComplete="off"
                     className="w-full px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-xs font-mono"
                     value={appSecret}
                     onChange={(e) =>
@@ -778,6 +782,8 @@ export function SettingsPanel() {
                 <div className="space-y-1">
                   <div className="text-[10px] text-[var(--muted)]">{t("settingsChannelsFeishuUat")}</div>
                   <input
+                    type="password"
+                    autoComplete="off"
                     className="w-full px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--border)] text-xs font-mono"
                     value={uat}
                     onChange={(e) =>
