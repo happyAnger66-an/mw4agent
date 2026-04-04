@@ -1,4 +1,4 @@
-# Orbit
+# ![icon](./frontend/desktop/icons/planet.png) Orbit
 
 Python 实现的智能体网关与 CLI，提供 Gateway、Agent 运行、多通道接入与 Web 控制台/Destop native等能力。
 
