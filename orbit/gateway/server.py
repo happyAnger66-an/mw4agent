@@ -1628,6 +1628,55 @@ def create_app(
                 },
             }
 
+        if method == "orchestrate.inspect_agents":
+            orch_id = str(params.get("orchId") or "").strip()
+            if not orch_id:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "orchId is required"}}
+            try:
+                payload = orchestrator.inspect_participants_capabilities(orch_id)
+            except ValueError as e:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": str(e)}}
+            except Exception as e:
+                return {"id": req_id, "ok": False, "error": {"code": "unavailable", "message": str(e)}}
+            return {"id": req_id, "ok": True, "payload": payload}
+
+        if method == "orchestrate.dump":
+            import base64
+
+            from .orch_dump import MAX_ZIP_BYTES, build_orchestration_dump_zip
+
+            orch_id = str(params.get("orchId") or "").strip()
+            if not orch_id:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "orchId is required"}}
+            try:
+                raw, fname = build_orchestration_dump_zip(orch_id=orch_id, orchestrator=orchestrator)
+            except ValueError as e:
+                msg = str(e)
+                code = "payload_too_large" if "exceeds limit" in msg else "invalid_request"
+                return {"id": req_id, "ok": False, "error": {"code": code, "message": msg}}
+            except Exception as e:
+                return {"id": req_id, "ok": False, "error": {"code": "unavailable", "message": str(e)}}
+            if len(raw) > MAX_ZIP_BYTES:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {
+                        "code": "payload_too_large",
+                        "message": f"zip exceeds limit ({MAX_ZIP_BYTES} bytes); reduce workspace size",
+                    },
+                }
+            b64 = base64.b64encode(raw).decode("ascii")
+            return {
+                "id": req_id,
+                "ok": True,
+                "payload": {
+                    "orchId": orch_id,
+                    "filename": fname,
+                    "zipBase64": b64,
+                    "sizeBytes": len(raw),
+                },
+            }
+
         if method == "orchestrate.get":
             orch_id = str(params.get("orchId") or "").strip()
             if not orch_id:

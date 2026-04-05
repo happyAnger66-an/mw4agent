@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { useTheme } from "next-themes";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getGatewayBaseUrl } from "@/lib/gateway";
 import { useI18n } from "@/lib/i18n";
 import { AgentsPanel } from "@/components/AgentsPanel";
@@ -15,6 +15,8 @@ import { StatsPanel } from "@/components/StatsPanel";
 
 type MainView = "home" | "agents" | "skills" | "orchestrate" | "trace" | "stats" | "settings";
 
+const NAV_COLLAPSED_STORAGE_KEY = "orbit-desktop-nav-collapsed";
+
 export function AppShell() {
   const { t, locale, setLocale } = useI18n();
   const { theme, setTheme } = useTheme();
@@ -23,6 +25,26 @@ export function AppShell() {
   const [chatSessionKey, setChatSessionKey] = useState(0);
   const [chatAgentId, setChatAgentId] = useState<string | undefined>(undefined);
   const [orchOpenKey, setOrchOpenKey] = useState(0);
+  const [navCollapsed, setNavCollapsed] = useState(false);
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(NAV_COLLAPSED_STORAGE_KEY) === "1") {
+        setNavCollapsed(true);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const setNavCollapsedPersist = useCallback((collapsed: boolean) => {
+    setNavCollapsed(collapsed);
+    try {
+      localStorage.setItem(NAV_COLLAPSED_STORAGE_KEY, collapsed ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   const openNewTask = useCallback(() => {
     setChatAgentId(undefined);
@@ -42,23 +64,59 @@ export function AppShell() {
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-[var(--bg)] text-[var(--text)]">
-      <aside className="flex w-56 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--panel)]">
-        <div className="border-b border-[var(--border)] px-4 py-4">
-          <div className="flex items-center gap-2.5">
+      {navCollapsed ? (
+        <div className="flex w-11 shrink-0 flex-col items-center border-r border-[var(--border)] bg-[var(--panel)] pt-2 pb-2">
+          <button
+            type="button"
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--bg)] hover:opacity-90"
+            title={t("navShowSidebar")}
+            aria-label={t("navShowSidebar")}
+            onClick={() => setNavCollapsedPersist(false)}
+          >
             <Image
-              src="/icons/planet.png"
-              alt="Orbit"
-              width={28}
-              height={28}
-              className="h-7 w-7 shrink-0 rounded-md object-contain"
+              src="/icons/redisplay.png"
+              alt=""
+              width={20}
+              height={20}
+              className="h-5 w-5 object-contain"
             />
-            <div className="text-lg font-semibold tracking-tight text-[var(--text)]">
-              {t("brandOrbit")}
+          </button>
+        </div>
+      ) : (
+        <aside className="flex w-56 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--panel)]">
+          <div className="border-b border-[var(--border)] px-3 py-3 sm:px-4 sm:py-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-2.5">
+                <Image
+                  src="/icons/planet.png"
+                  alt="Orbit"
+                  width={28}
+                  height={28}
+                  className="h-7 w-7 shrink-0 rounded-md object-contain"
+                />
+                <div className="truncate text-lg font-semibold tracking-tight text-[var(--text)]">
+                  {t("brandOrbit")}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--bg)] hover:opacity-90"
+                title={t("navHideSidebar")}
+                aria-label={t("navHideSidebar")}
+                onClick={() => setNavCollapsedPersist(true)}
+              >
+                <Image
+                  src="/icons/hide.png"
+                  alt=""
+                  width={20}
+                  height={20}
+                  className="h-5 w-5 object-contain"
+                />
+              </button>
             </div>
           </div>
-        </div>
 
-        <nav className="flex flex-col gap-0.5 p-2">
+          <nav className="flex flex-col gap-0.5 p-2">
           <button
             type="button"
             onClick={openNewTask}
@@ -251,7 +309,8 @@ export function AppShell() {
             </button>
           </div>
         </div>
-      </aside>
+        </aside>
+      )}
 
       <section className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--bg)]">
         {chatOpen ? (

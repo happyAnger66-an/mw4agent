@@ -18,6 +18,9 @@ import {
   orchestrateDelete,
   orchestrateGet,
   orchestrateReset,
+  orchestrateInspectAgents,
+  orchestrateDump,
+  downloadZipFromBase64,
   orchestrateList,
   orchestrateSend,
   orchestrateUpdate,
@@ -28,6 +31,7 @@ import {
   type AgentWsEvent,
   type OrchMessage,
   type OrchestrateDagSpec,
+  type OrchestrateInspectAgentRow,
   type OrchestrateListItem,
   type OrchestrateReplyLanguage,
 } from "@/lib/gateway";
@@ -37,6 +41,11 @@ import { useI18n } from "@/lib/i18n";
 import { ChatThinkToolCheckbox } from "@/components/ChatThinkToolCheckbox";
 import { OrchestrateMentionInput } from "@/components/OrchestrateMentionInput";
 import { busyFromOrchestrateStatus } from "@/lib/orchestratePollBusy";
+import {
+  collectOrchestrateAgentUsageRows,
+  formatTokenCount,
+  parseWsUsage,
+} from "@/lib/orchestrateContextUsage";
 import { useGatewayWs } from "@/lib/gateway-ws-context";
 
 type ToolTraceRow = {
@@ -56,6 +65,8 @@ type LiveRun = {
   reasoning?: string;
   plannedToolCalls?: PlannedToolCall[];
   toolTraces?: ToolTraceRow[];
+  /** From lifecycle end (same shape as persisted message usage) */
+  usage?: { input?: number; output?: number; total?: number };
 };
 
 function formatToolResultPreview(r: unknown): string {
@@ -248,6 +259,10 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
   const [orchAgentsMdDirty, setOrchAgentsMdDirty] = useState(false);
   const [orchAgentsMdSaving, setOrchAgentsMdSaving] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [inspectOpen, setInspectOpen] = useState(false);
+  const [inspectLoading, setInspectLoading] = useState(false);
+  const [inspectAgents, setInspectAgents] = useState<OrchestrateInspectAgentRow[]>([]);
+  const [dumpExporting, setDumpExporting] = useState(false);
   const [live, setLive] = useState<LiveRun | null>(null);
   const messagesWrapRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -286,7 +301,14 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
           });
         }
         if (phase === "end" || phase === "error") {
-          setLive((prev) => (prev && prev.runId === runId ? { ...prev, step: undefined } : prev));
+          setLive((prev) => {
+            if (!prev || prev.runId !== runId) return prev;
+            if (phase === "end") {
+              const u = parseWsUsage(data.usage);
+              return { ...prev, step: undefined, ...(u ? { usage: u } : {}) };
+            }
+            return { ...prev, step: undefined };
+          });
         }
         return;
       }
@@ -1100,11 +1122,60 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     void loadOrches();
   }, [loadOrches, selectedOrchId, selectedTitle, t]);
 
+  const doInspectAgents = useCallback(async () => {
+    const orchId = selectedOrchId.trim();
+    if (!orchId) return;
+    setInspectOpen(true);
+    setInspectLoading(true);
+    setInspectAgents([]);
+    setError(null);
+    const r = await orchestrateInspectAgents(orchId);
+    setInspectLoading(false);
+    if (!r.ok) {
+      setError(r.error || t("orchestrateError"));
+      return;
+    }
+    setInspectAgents(r.agents);
+  }, [selectedOrchId, t]);
+
+  const doDumpZip = useCallback(async () => {
+    const orchId = selectedOrchId.trim();
+    if (!orchId) return;
+    setDumpExporting(true);
+    setError(null);
+    try {
+      const r = await orchestrateDump(orchId);
+      if (!r.ok) {
+        setError(
+          r.errorCode === "payload_too_large"
+            ? t("orchestrateDumpTooLarge")
+            : r.error || t("orchestrateError")
+        );
+        return;
+      }
+      downloadZipFromBase64(r.zipBase64, r.filename);
+    } finally {
+      setDumpExporting(false);
+    }
+  }, [selectedOrchId, t]);
+
   const selectedParticipants = useMemo(() => {
     const parts = selected?.participants ?? [];
     const norm = parts.map((p) => (p || "").trim()).filter(Boolean);
     return Array.from(new Set(norm)).sort((a, b) => a.localeCompare(b));
   }, [selected?.participants]);
+
+  const orchUsageRows = useMemo(
+    () =>
+      collectOrchestrateAgentUsageRows({
+        participants: selected?.participants ?? [],
+        messages: selected?.messages ?? [],
+        listedAgents,
+        liveAgentId: live?.agentId,
+        liveUsage: live?.usage ?? null,
+      }),
+    [selected?.messages, selected?.participants, listedAgents, live?.agentId, live?.usage]
+  );
 
   useEffect(() => {
     if (!participantsOpen) return;
@@ -1302,15 +1373,112 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
                   </div>
                 ) : null}
               </div>
-              <button
-                type="button"
-                disabled={busy || busyFromOrchestrateStatus(selected?.status || "")}
-                className="text-xs px-2 py-1 rounded-md border border-[var(--border)] bg-[var(--bg)] hover:opacity-90 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
-                title={t("orchestrateReset")}
-                onClick={() => void doResetSession()}
-              >
-                {t("orchestrateReset")}
-              </button>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  disabled={
+                    busy ||
+                    dumpExporting ||
+                    busyFromOrchestrateStatus(selected?.status || "")
+                  }
+                  className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={dumpExporting ? t("orchestrateDumpRunning") : t("orchestrateDump")}
+                  aria-label={t("orchestrateDump")}
+                  onClick={() => void doDumpZip()}
+                >
+                  <Image
+                    src="/icons/snapshot.png"
+                    alt=""
+                    width={18}
+                    height={18}
+                    className="h-[18px] w-[18px] object-contain opacity-90"
+                  />
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || busyFromOrchestrateStatus(selected?.status || "")}
+                  className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={t("orchestrateInspect")}
+                  aria-label={t("orchestrateInspect")}
+                  onClick={() => void doInspectAgents()}
+                >
+                  <Image
+                    src="/icons/check.png"
+                    alt=""
+                    width={18}
+                    height={18}
+                    className="h-[18px] w-[18px] object-contain opacity-90"
+                  />
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || busyFromOrchestrateStatus(selected?.status || "")}
+                  className="text-xs px-2 py-1 rounded-md border border-[var(--border)] bg-[var(--bg)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={t("orchestrateReset")}
+                  onClick={() => void doResetSession()}
+                >
+                  {t("orchestrateReset")}
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {selectedOrchId && orchUsageRows.length > 0 ? (
+            <div className="mb-2 rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 py-2">
+              <div className="text-[10px] font-semibold text-[var(--muted)] uppercase tracking-wide mb-1.5">
+                {t("orchestrateContextUsageTitle")}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {orchUsageRows.map((row) => {
+                  const u = row.usage;
+                  const inp = u?.input;
+                  const out = u?.output;
+                  const tot = u?.total;
+                  const lim = row.contextLimit;
+                  const hasAny = inp != null || out != null || tot != null;
+                  const pct =
+                    lim != null && inp != null && lim > 0
+                      ? Math.min(100, Math.round((inp / lim) * 100))
+                      : null;
+                  return (
+                    <div
+                      key={row.agentId}
+                      className="min-w-[140px] flex-1 rounded-md border border-[var(--border)] bg-[var(--bg)]/50 px-2 py-1.5"
+                    >
+                      <div
+                        className={`text-[11px] font-mono font-semibold ${speakerColorClass(row.agentId)}`}
+                      >
+                        {row.agentId}
+                      </div>
+                      <div className="text-[10px] text-[var(--muted)] mt-0.5 font-mono">
+                        {hasAny ? (
+                          <>
+                            in {inp != null ? formatTokenCount(inp) : "—"} · out{" "}
+                            {out != null ? formatTokenCount(out) : "—"}
+                            {tot != null ? ` · Σ ${formatTokenCount(tot)}` : ""}
+                            {lim != null ? ` / ${formatTokenCount(lim)}` : ""}
+                          </>
+                        ) : (
+                          <span>{t("orchestrateContextUsageNoRun")}</span>
+                        )}
+                      </div>
+                      {pct != null ? (
+                        <div
+                          className="mt-1 h-1.5 rounded-full bg-[var(--border)] overflow-hidden"
+                          title={`${pct}%`}
+                        >
+                          <div
+                            className="h-full bg-[var(--accent)]"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-[9px] text-[var(--muted)] mt-1.5 leading-snug">
+                {t("orchestrateContextUsageHint")}
+              </p>
             </div>
           ) : null}
           {selectedOrchId && live ? (
@@ -1331,6 +1499,17 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
                   </span>
                 </span>
               </div>
+              {live.usage &&
+              (live.usage.input != null ||
+                live.usage.output != null ||
+                live.usage.total != null) ? (
+                <div className="text-[10px] font-mono text-[var(--muted)] mt-1">
+                  {t("orchestrateMsgUsage")}: in{" "}
+                  {live.usage.input != null ? formatTokenCount(live.usage.input) : "—"} · out{" "}
+                  {live.usage.output != null ? formatTokenCount(live.usage.output) : "—"}
+                  {live.usage.total != null ? ` · Σ ${formatTokenCount(live.usage.total)}` : ""}
+                </div>
+              ) : null}
               {live.step ? <div className="text-xs text-[var(--muted)] mt-1">{live.step}</div> : null}
               {live.plannedToolCalls && live.plannedToolCalls.length ? (
                 <div className="mt-2 text-[10px] text-[var(--muted)]">
@@ -1449,6 +1628,18 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
                           </>
                         ) : null}
                       </div>
+                      {m.role === "assistant" &&
+                      m.usage &&
+                      (m.usage.input != null ||
+                        m.usage.output != null ||
+                        m.usage.total != null) ? (
+                        <div className="text-[9px] text-[var(--muted)] font-mono">
+                          {t("orchestrateMsgUsage")}: in{" "}
+                          {m.usage.input != null ? formatTokenCount(m.usage.input) : "—"} · out{" "}
+                          {m.usage.output != null ? formatTokenCount(m.usage.output) : "—"}
+                          {m.usage.total != null ? ` · Σ ${formatTokenCount(m.usage.total)}` : ""}
+                        </div>
+                      ) : null}
                       <div className="text-xs whitespace-pre-wrap break-words leading-relaxed">
                         {m.text}
                       </div>
@@ -2034,6 +2225,96 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
                       </button>
                     );
                   })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {inspectOpen ? (
+        <div
+          className="fixed inset-0 z-[55] flex items-center justify-center bg-black/50 p-4"
+          role="presentation"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setInspectOpen(false);
+          }}
+        >
+          <div
+            className="flex max-h-[86vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--bg)] shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="orbit-orch-inspect-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex shrink-0 items-center justify-between border-b border-[var(--border)] px-4 py-3">
+              <h3 id="orbit-orch-inspect-title" className="text-sm font-semibold">
+                {t("orchestrateInspectTitle")}
+              </h3>
+              <button
+                type="button"
+                className="rounded px-2 py-1 text-xs text-[var(--muted)] hover:bg-[var(--panel)]"
+                onClick={() => setInspectOpen(false)}
+              >
+                {t("orchestrateInspectClose")}
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+              {inspectLoading ? (
+                <div className="text-xs text-[var(--muted)]">{t("orchestrateInspectLoading")}</div>
+              ) : (
+                <div className="space-y-6">
+                  {inspectAgents.map((row) => (
+                    <section
+                      key={row.agentId}
+                      className="rounded-lg border border-[var(--border)] bg-[var(--panel)] p-3"
+                    >
+                      <div className="mb-2 font-mono text-sm font-semibold text-[var(--text)]">
+                        {row.agentId}
+                      </div>
+                      <div className="mb-3">
+                        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+                          {t("orchestrateInspectTools")} ({row.tools?.length ?? 0})
+                        </div>
+                        <ul className="max-h-32 list-disc space-y-0.5 overflow-y-auto pl-4 font-mono text-[11px] text-[var(--text)]">
+                          {(row.tools || []).map((name) => (
+                            <li key={name}>{name}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div>
+                        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+                          {t("orchestrateInspectSkills")} ({row.skillsCount ?? row.skills?.length ?? 0})
+                        </div>
+                        <div className="mb-2 text-[10px] text-[var(--muted)]">
+                          {t("orchestrateInspectSkillsMeta", {
+                            count: String(row.skillsCount ?? row.skills?.length ?? 0),
+                            promptCount: String(row.skillsPromptCount ?? 0),
+                          })}
+                        </div>
+                        {(row.skills || []).length ? (
+                          <ul className="max-h-48 space-y-2 overflow-y-auto text-xs">
+                            {(row.skills || []).map((s, i) => (
+                              <li
+                                key={`${String(s.name ?? "")}-${i}`}
+                                className="border-b border-[var(--border)]/60 pb-2 last:border-0"
+                              >
+                                <div className="font-mono font-medium text-[var(--text)]">{s.name}</div>
+                                {s.source ? (
+                                  <div className="text-[10px] text-[var(--muted)]">{s.source}</div>
+                                ) : null}
+                                {s.description ? (
+                                  <div className="mt-1 text-[11px] text-[var(--muted)]">{s.description}</div>
+                                ) : null}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="text-xs text-[var(--muted)]">{t("orchestrateInspectNoSkills")}</div>
+                        )}
+                      </div>
+                    </section>
+                  ))}
                 </div>
               )}
             </div>

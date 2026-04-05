@@ -2,6 +2,8 @@
 
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { TraceUsageSummary } from "@/components/TraceUsageSummary";
+import { computeTraceUsageStats } from "@/lib/traceUsageStats";
 import {
   orchestrateGet,
   orchestrateList,
@@ -15,6 +17,7 @@ import {
   traceEventTypeClass,
 } from "@/lib/orchestrateTraceFormat";
 import { useI18n } from "@/lib/i18n";
+import { TraceLlmPromptPayload } from "@/components/TraceLlmPromptPayload";
 
 function payloadPreviewJson(payload: unknown): string {
   if (payload == null) return "";
@@ -151,6 +154,11 @@ export function TracePanel() {
   const traceTimeFilterInputsDirty =
     traceFilterStart.trim() !== "" || traceFilterEnd.trim() !== "";
 
+  const traceUsageStats = useMemo(
+    () => computeTraceUsageStats(filteredEvents),
+    [filteredEvents]
+  );
+
   const selectedTitle = (() => {
     const o = orches.find((x) => x.orchId === selectedOrchId);
     const n = (o?.name || "").trim();
@@ -283,6 +291,7 @@ export function TracePanel() {
                 </button>
               ) : null}
             </div>
+            {events.length > 0 ? <TraceUsageSummary stats={traceUsageStats} /> : null}
             <div className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--panel)] p-3 space-y-0">
               {events.length === 0 ? (
                 <p className="text-xs text-[var(--muted)] py-6 text-center">{t("orchestrateTraceEmpty")}</p>
@@ -323,9 +332,18 @@ export function TracePanel() {
                             <span className="text-[10px] text-[var(--muted)] shrink-0">{expanded ? "▼" : "▶"}</span>
                           </button>
                           {expanded && ev.payload != null ? (
-                            <pre className="text-[10px] font-mono px-3 pb-3 pt-0 text-[var(--text)]/90 whitespace-pre-wrap break-words max-h-64 overflow-y-auto border-t border-[var(--border)]/60">
-                              {payloadPreviewJson(ev.payload)}
-                            </pre>
+                            typ === "llm_prompt" &&
+                            typeof ev.payload === "object" &&
+                            ev.payload !== null &&
+                            !Array.isArray(ev.payload) ? (
+                              <TraceLlmPromptPayload
+                                payload={ev.payload as Record<string, unknown>}
+                              />
+                            ) : (
+                              <pre className="text-[10px] font-mono px-3 pb-3 pt-0 text-[var(--text)]/90 whitespace-pre-wrap break-words max-h-64 overflow-y-auto border-t border-[var(--border)]/60">
+                                {payloadPreviewJson(ev.payload)}
+                              </pre>
+                            )
                           ) : null}
                         </div>
                       </li>

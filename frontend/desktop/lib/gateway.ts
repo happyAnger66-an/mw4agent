@@ -179,6 +179,9 @@ export type ListedAgentLlm = {
   model?: string;
   base_url?: string;
   thinking_level?: string;
+  /** Configured context window (tokens), when set in agent ``llm`` JSON */
+  context_window?: number;
+  contextWindow?: number;
 };
 
 export type ListedAgent = {
@@ -669,6 +672,8 @@ export type OrchMessage = {
   text: string;
   /** DAG 节点 id（strategy=dag 时助手消息可能带此字段） */
   nodeId?: string;
+  /** 该条助手消息对应一次 agent 完成的 token 用量（网关 runner meta） */
+  usage?: { input?: number; output?: number; total?: number };
 };
 
 /** 与网关 `orchestrate.create` / `orch.json` 中 dag 字段一致；节点可含 `position` 供后续画布编辑 */
@@ -922,6 +927,82 @@ export async function orchestrateReset(orchId: string): Promise<OrchestrateReset
     sessionKey: String(p.sessionKey ?? ""),
     currentRound: Number(p.currentRound ?? 0),
   };
+}
+
+export type OrchestrateInspectSkillRow = {
+  name?: string;
+  source?: string;
+  description?: string;
+};
+
+export type OrchestrateInspectAgentRow = {
+  agentId: string;
+  tools: string[];
+  skills: OrchestrateInspectSkillRow[];
+  skillsCount?: number;
+  skillsPromptCount?: number;
+  skillsPromptTruncated?: boolean;
+  skillsPromptCompact?: boolean;
+};
+
+export type OrchestrateInspectResult =
+  | { ok: true; orchId: string; agents: OrchestrateInspectAgentRow[] }
+  | { ok: false; error?: string };
+
+/** List effective tools + skills per orchestration participant (read-only audit). */
+export async function orchestrateInspectAgents(orchId: string): Promise<OrchestrateInspectResult> {
+  const r = await callRpc("orchestrate.inspect_agents", { orchId: orchId.trim() });
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "orchestrate.inspect_agents failed" };
+  }
+  const p = r.payload as { orchId?: string; agents?: OrchestrateInspectAgentRow[] };
+  return {
+    ok: true,
+    orchId: String(p.orchId ?? ""),
+    agents: Array.isArray(p.agents) ? p.agents : [],
+  };
+}
+
+export type OrchestrateDumpResult =
+  | { ok: true; orchId: string; filename: string; zipBase64: string; sizeBytes: number }
+  | { ok: false; error?: string; errorCode?: string };
+
+/** ZIP export: orch state (redacted), team MDs, per-agent workspaces, tools/skills JSON. */
+export async function orchestrateDump(orchId: string): Promise<OrchestrateDumpResult> {
+  const r = await callRpc("orchestrate.dump", { orchId: orchId.trim() });
+  if (!r.ok || !r.payload) {
+    return {
+      ok: false,
+      error: r.error?.message || "orchestrate.dump failed",
+      errorCode: r.error?.code,
+    };
+  }
+  const p = r.payload as { orchId?: string; filename?: string; zipBase64?: string; sizeBytes?: number };
+  return {
+    ok: true,
+    orchId: String(p.orchId ?? ""),
+    filename: String(p.filename ?? "orch-dump.zip"),
+    zipBase64: String(p.zipBase64 ?? ""),
+    sizeBytes: Number(p.sizeBytes ?? 0),
+  };
+}
+
+/** Browser download for ``orchestrateDump`` payload (client components only). */
+export function downloadZipFromBase64(zipBase64: string, filename: string): void {
+  if (typeof window === "undefined") return;
+  const binaryString = atob(zipBase64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+  const blob = new Blob([bytes], { type: "application/zip" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename.replace(/[/\\]/g, "_");
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 export type OrchestrateRouterLlmPublic = {

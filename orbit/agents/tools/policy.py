@@ -168,6 +168,16 @@ def _match_any(name: str, patterns: Sequence[str]) -> bool:
     return False
 
 
+def _shell_exec_equivalent_names(tool_name: str) -> List[str]:
+    """exec and execute_sh are the same capability; sandbox allow/deny should treat both."""
+    n = (tool_name or "").strip().lower()
+    if n == "execute_sh":
+        return ["execute_sh", "exec"]
+    if n == "exec":
+        return ["exec", "execute_sh"]
+    return [n]
+
+
 def _profile_allow_list(profile: str) -> List[str]:
     """Return the base allow list for a named profile.
 
@@ -332,15 +342,20 @@ def is_tool_allowed_by_sandbox(policy: SandboxToolPolicy, name: str) -> bool:
     allow = policy.allow or []
 
     # 1) deny always wins
-    if deny and _match_any(name, deny):
-        return False
+    if deny:
+        for n in _shell_exec_equivalent_names(name):
+            if _match_any(n, deny):
+                return False
 
     # 2) allow empty => blacklist-only mode
     if not allow:
         return True
 
     # 3) allow non-empty => whitelist mode
-    return _match_any(name, allow)
+    for n in _shell_exec_equivalent_names(name):
+        if _match_any(n, allow):
+            return True
+    return False
 
 
 def filter_tools_by_sandbox_policy(

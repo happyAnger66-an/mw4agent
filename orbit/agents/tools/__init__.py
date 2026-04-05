@@ -23,6 +23,7 @@ def _register_builtin_tools() -> None:
         WebSearchTool(),
         WebFetchTool(),
         ExecTool(),
+        ExecTool(tool_name="execute_sh"),
         ProcessTool(),
     ):
         if reg.get_tool(tool.name) is None:

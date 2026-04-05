@@ -147,6 +147,7 @@ _TOOL_NAME_ALIASES = {
     "bash": "exec",
     "shell_exec": "exec",
     "run_command": "exec",
+    "execute-sh": "execute_sh",
     "apply-patch": "apply_patch",
 }
 
@@ -421,6 +422,15 @@ class AgentRunner:
 
             duration_ms = int((time.time() - start_time) * 1000)
 
+            usage_out: Optional[Dict[str, int]] = None
+            mu = getattr(result.meta, "usage", None)
+            if isinstance(mu, dict) and mu:
+                usage_out = {
+                    k: int(mu[k])
+                    for k in ("input", "output", "total")
+                    if k in mu and isinstance(mu[k], int) and mu[k] >= 0
+                } or None
+
             # Emit lifecycle end event
             await self.event_stream.emit(
                 StreamEvent(
@@ -432,6 +442,7 @@ class AgentRunner:
                         "status": "completed",
                         "agent_id": params.agent_id,
                         "stop_reason": result.meta.stop_reason,
+                        "usage": usage_out,
                     },
                 )
             )

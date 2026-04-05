@@ -25,40 +25,63 @@ def _ensure_under_root(resolved: str, root: str) -> None:
         raise PermissionError(f"exec: cwd is outside workspace root: {root}")
 
 
+def _shell_command_from_params(params: Dict[str, Any]) -> str:
+    """Prefer ``command``, then ``script`` (some models use script for shell tools)."""
+    for key in ("command", "script"):
+        v = params.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def _exec_tool_parameters(*, require_command: bool, include_script_prop: bool) -> Dict[str, Any]:
+    props: Dict[str, Any] = {
+        "command": {
+            "type": "string",
+            "description": "Shell command to execute.",
+        },
+        "cwd": {
+            "type": "string",
+            "description": "Optional working directory (relative to workspace or absolute path).",
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "description": "Optional timeout in milliseconds (default: 10000 or tools.timeout_ms in config, max: 120000).",
+        },
+        "max_output_chars": {
+            "type": "integer",
+            "description": "Optional max chars for stdout/stderr each (default: 12000).",
+        },
+    }
+    if include_script_prop:
+        props["script"] = {
+            "type": "string",
+            "description": "Shell command (alternate to command; some models emit script only).",
+        }
+    required = ["command"] if require_command else []
+    return {"type": "object", "properties": props, "required": required}
+
+
 class ExecTool(AgentTool):
     """Execute a shell command and return stdout/stderr/exit_code."""
 
-    def __init__(self) -> None:
-        super().__init__(
-            name="exec",
-            description=(
+    def __init__(self, *, tool_name: str = "exec") -> None:
+        tn = (tool_name or "exec").strip() or "exec"
+        if tn == "execute_sh":
+            desc = (
                 "Execute a shell command in the workspace (high-risk, owner-only). "
-                "Supports timeout_ms and optional cwd."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Shell command to execute.",
-                    },
-                    "cwd": {
-                        "type": "string",
-                        "description": "Optional working directory (relative to workspace or absolute path).",
-                    },
-                    "timeout_ms": {
-                        "type": "integer",
-                        "description": "Optional timeout in milliseconds (default: 10000 or tools.timeout_ms in config, max: 120000).",
-                    },
-                    "max_output_chars": {
-                        "type": "integer",
-                        "description": "Optional max chars for stdout/stderr each (default: 12000).",
-                    },
-                },
-                "required": ["command"],
-            },
-            owner_only=True,
-        )
+                "Same behavior as exec; use this tool when instructions expect execute_sh. "
+                "Provide command and/or script (one must be non-empty)."
+            )
+            params = _exec_tool_parameters(require_command=False, include_script_prop=True)
+        else:
+            desc = (
+                "Execute a shell command in the workspace (high-risk, owner-only). "
+                "Supports timeout_ms and optional cwd. "
+                "If the model emits script instead of command, script is accepted as an alias."
+            )
+            params = _exec_tool_parameters(require_command=True, include_script_prop=True)
+        super().__init__(name=tn, description=desc, parameters=params, owner_only=True)
 
     async def execute(
         self,
@@ -69,10 +92,13 @@ class ExecTool(AgentTool):
         workspace_dir = str((context or {}).get("workspace_dir") or os.getcwd())
         workspace_only = bool((context or {}).get("tools_fs_workspace_only") is True)
 
-        command = params.get("command")
-        command = command.strip() if isinstance(command, str) else ""
+        command = _shell_command_from_params(params)
         if not command:
-            return ToolResult(success=False, result={}, error="exec: command is required")
+            return ToolResult(
+                success=False,
+                result={},
+                error=f"{self.name}: command or script is required",
+            )
 
         cwd_raw = params.get("cwd")
         if isinstance(cwd_raw, str) and cwd_raw.strip():
@@ -83,7 +109,7 @@ class ExecTool(AgentTool):
             cwd = workspace_dir
         cwd = os.path.normpath(os.path.abspath(cwd))
         if not os.path.isdir(cwd):
-            return ToolResult(success=False, result={}, error=f"exec: cwd does not exist: {cwd}")
+            return ToolResult(success=False, result={}, error=f"{self.name}: cwd does not exist: {cwd}")
         if workspace_only:
             try:
                 _ensure_under_root(cwd, workspace_dir)
@@ -115,7 +141,7 @@ class ExecTool(AgentTool):
                 preexec_fn=os.setsid,
             )
         except Exception as e:
-            return ToolResult(success=False, result={}, error=f"exec: failed to start command: {e}")
+            return ToolResult(success=False, result={}, error=f"{self.name}: failed to start command: {e}")
 
         timed_out = False
         try:
@@ -162,8 +188,8 @@ class ExecTool(AgentTool):
         }
         error = None
         if timed_out:
-            error = f"exec: command timed out after {timeout_ms}ms"
+            error = f"{self.name}: command timed out after {timeout_ms}ms"
         elif exit_code != 0:
-            error = f"exec: command failed with exit code {exit_code}"
+            error = f"{self.name}: command failed with exit code {exit_code}"
         return ToolResult(success=success, result=result, error=error)
 

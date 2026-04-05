@@ -13,6 +13,7 @@ from orbit.agents.tools.policy import (
     SandboxToolPolicy,
     filter_tools_by_policy,
     filter_tools_by_sandbox_policy,
+    is_tool_allowed_by_sandbox,
     resolve_effective_policy_for_context,
     resolve_effective_allow_patterns,
     resolve_sandbox_tool_policy_config,

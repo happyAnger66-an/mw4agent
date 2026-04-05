@@ -10,11 +10,11 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..agents.agent_manager import AgentManager
 from ..agents.runner.runner import AgentRunner
-from ..agents.types import AgentRunParams, AgentRunResult
+from ..agents.types import AgentRunMeta, AgentRunParams, AgentRunResult
 from ..config.paths import get_state_dir, normalize_agent_id, resolve_orchestration_agent_workspace_dir
 from ..llm.backends import _call_openai_chat, _thinking_extra_body, list_providers  # type: ignore
 from ..memory.bootstrap import load_bootstrap_for_orchestration, load_orchestration_team_agents_appendix
@@ -28,6 +28,31 @@ from .orch_trace import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _usage_dict_from_meta(meta: AgentRunMeta) -> Optional[Dict[str, int]]:
+    """Copy provider usage (input/output/total) for orch message persistence."""
+    u = getattr(meta, "usage", None)
+    if not isinstance(u, dict) or not u:
+        return None
+    out: Dict[str, int] = {}
+    for k in ("input", "output", "total"):
+        v = u.get(k)
+        if isinstance(v, int) and v >= 0:
+            out[k] = v
+    return out or None
+
+
+def _usage_dict_from_json(m: Dict[str, Any]) -> Optional[Dict[str, int]]:
+    raw = m.get("usage")
+    if not isinstance(raw, dict):
+        return None
+    out: Dict[str, int] = {}
+    for k in ("input", "output", "total"):
+        v = raw.get(k)
+        if isinstance(v, int) and v >= 0:
+            out[k] = v
+    return out or None
 
 # Router LLM: transcript / snippets (characters) for routing prompt and agent message context.
 _ROUTER_LLM_TRANSCRIPT_MAX_CHARS = 12000
@@ -122,6 +147,8 @@ class OrchMessage:
     role: str  # "user"|"assistant"
     text: str
     nodeId: str = ""  # DAG node id when strategy=dag and role=assistant
+    # Last agent run token usage (from runner meta): input / output / total
+    usage: Optional[Dict[str, int]] = None
 
 
 @dataclass
@@ -165,6 +192,32 @@ class OrchState:
     # When True, append JSONL trace (inputs, tools, LLM rounds, outputs) under orchestrations/<id>/trace.jsonl
     orchTraceEnabled: bool = False
     orchTraceSeq: int = 0  # next seq for trace.jsonl rows
+
+
+def collect_inspect_agent_ids(st: OrchState) -> List[str]:
+    """Ordered unique agent ids for orchestration capability inspection (participants + DAG + supervisor)."""
+    seen: set[str] = set()
+    out: List[str] = []
+    for p in st.participants or []:
+        a = normalize_agent_id(str(p).strip())
+        if a and a not in seen:
+            seen.add(a)
+            out.append(a)
+    if (st.strategy or "").strip().lower() == "dag" and isinstance(st.dagSpec, dict):
+        for n in st.dagSpec.get("nodes") or []:
+            if not isinstance(n, dict):
+                continue
+            raw = str(n.get("agentId") or "").strip()
+            a = normalize_agent_id(raw) if raw else normalize_agent_id("main")
+            if a not in seen:
+                seen.add(a)
+                out.append(a)
+    for p in st.supervisorPipeline or []:
+        a = normalize_agent_id(str(p).strip())
+        if a and a not in seen:
+            seen.add(a)
+            out.append(a)
+    return out if out else [normalize_agent_id("main")]
 
 
 def _truncate_text(s: str, max_len: int) -> str:
@@ -585,6 +638,7 @@ class Orchestrator:
                     role=str(m.get("role") or ""),
                     text=str(m.get("text") or ""),
                     nodeId=str(m.get("nodeId") or m.get("node_id") or ""),
+                    usage=_usage_dict_from_json(m),
                 )
             )
         dag_raw = data.get("dagSpec")
@@ -778,6 +832,28 @@ class Orchestrator:
 
         self._save(st)
         return st
+
+    def inspect_participants_capabilities(self, orch_id: str) -> Dict[str, Any]:
+        """Per-agent effective tool names and skills catalog (orchestration workspace), for UI audit."""
+        from ..agents.tools.capabilities_preview import (
+            build_skills_inspect_for_orchestration_agent,
+            list_effective_tool_names_for_orchestrator_turn,
+        )
+
+        oid = (orch_id or "").strip()
+        if not oid:
+            raise ValueError("orchId is required")
+        st = self._load(oid)
+        if not st:
+            raise ValueError("orchestration not found")
+        agent_ids = collect_inspect_agent_ids(st)
+        tool_names = list_effective_tool_names_for_orchestrator_turn()
+        agents_out: List[Dict[str, Any]] = []
+        for aid in agent_ids:
+            ws = _orch_agent_workspace(st.orchId, aid)
+            sk = build_skills_inspect_for_orchestration_agent(agent_id=aid, workspace_dir=ws)
+            agents_out.append({"agentId": aid, "tools": list(tool_names), **sk})
+        return {"orchId": st.orchId, "agents": agents_out}
 
     def is_running(self, orch_id: str) -> bool:
         st = self._load(orch_id)
@@ -1326,6 +1402,7 @@ class Orchestrator:
                             speaker=agent_id,
                             role="assistant",
                             text=out_text,
+                            usage=_usage_dict_from_meta(result.meta),
                         )
                     )
                     self._save(st)
@@ -1539,6 +1616,7 @@ class Orchestrator:
                             speaker=agent_id,
                             role="assistant",
                             text=out_text,
+                            usage=_usage_dict_from_meta(result.meta),
                         )
                     )
                     next_r += 1
@@ -1629,8 +1707,8 @@ class Orchestrator:
         orig_user_message: str,
         outputs: Dict[str, str],
         dag_round: int = 0,
-    ) -> str:
-        """Execute one DAG node; returns assistant text (may raise)."""
+    ) -> Tuple[str, Optional[Dict[str, int]]]:
+        """Execute one DAG node; returns assistant text and run usage (may raise)."""
         agent_id = normalize_agent_id(str(node.get("agentId") or "main"))
         parts: List[str] = [f"[Orchestration task]\n{orig_user_message}\n"]
         for dep in node.get("dependsOn") or []:
@@ -1642,7 +1720,7 @@ class Orchestrator:
 
         st = self._load(orch_id)
         if not st:
-            return "(no state)"
+            return "(no state)", None
         rl = self._reasoning_level_for_orch(st)
         session_id = (st.dagNodeSessions or {}).get(nid) or str(uuid.uuid4())
         st.dagNodeSessions[nid] = session_id
@@ -1682,7 +1760,7 @@ class Orchestrator:
         out_text = "\n".join([p.text or "" for p in result.payloads if (p.text or "").strip()]).strip()
         if not out_text:
             out_text = "(no output)"
-        return out_text
+        return out_text, _usage_dict_from_meta(result.meta)
 
     async def _task_dag(self, orch_id: str) -> None:
         try:
@@ -1735,7 +1813,7 @@ class Orchestrator:
                     async with sem:
                         st2 = self._load(orch_id)
                         if not st2 or st2.status != "running":
-                            return nid, None, "aborted"
+                            return nid, None, "aborted", None
                         prog = st2.dagProgress or {}
                         ent = dict(prog.get(nid) or {})
                         ent["status"] = "running"
@@ -1743,7 +1821,7 @@ class Orchestrator:
                         st2.dagProgress = prog
                         self._save(st2)
                         try:
-                            text = await self._run_single_dag_node(
+                            text, usage = await self._run_single_dag_node(
                                 orch_id,
                                 nid=nid,
                                 node=nodes_by_id[nid],
@@ -1751,13 +1829,13 @@ class Orchestrator:
                                 outputs=outputs,
                                 dag_round=wave,
                             )
-                            return nid, text, None
+                            return nid, text, None, usage
                         except Exception as ex:
-                            return nid, None, str(ex)
+                            return nid, None, str(ex), None
 
                 batch = await asyncio.gather(*[_bound(nid) for nid in ready])
                 for item in batch:
-                    nid, text, err = item
+                    nid, text, err, usage = item
                     if err:
                         st = self._load(orch_id)
                         if st:
@@ -1792,6 +1870,7 @@ class Orchestrator:
                             role="assistant",
                             text=text,
                             nodeId=nid,
+                            usage=usage,
                         )
                     )
                     self._save(st)
