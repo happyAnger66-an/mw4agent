@@ -15,7 +15,31 @@
 - **目录覆盖**：`ORBIT_CONFIG_DIR=<dir>` → 读取 `<dir>/orbit.json`
 - **格式**：单个 JSON 对象，按顶层 section 组织（如 `llm`、`channels`、`tools`、`plugins` 等）
 
-### 1.2 加密存储（ConfigManager）
+**未设置 `ORBIT_CONFIG_DIR` 时，实际文件路径按以下顺序取「第一个已存在的文件」**（见 `orbit/config/root.py`）：
+
+1. `~/.orbit/orbit.json`
+2. `~/.orbit/config/orbit.json`
+3. `~/orbit/orbit.json`
+4. `~/orbit/config/orbit.json`
+5. `~/.mw4agent/mw4agent.json`
+6. `~/.mw4agent/config/mw4agent.json`
+
+若均不存在，则默认写入目录为 `~/.orbit/`（新建 `orbit.json`）。
+
+### 1.2 重启后配置像被清空 / 恢复默认（排查）
+
+常见原因：
+
+1. **多个根配置文件并存**：只要 **`~/.orbit/orbit.json` 存在**（哪怕是 `{}`），就会优先于 `~/orbit/orbit.json` 等路径。若某次启动创建了空的 `~/.orbit/orbit.json`，之后会一直读它，看起来像「只剩默认」。处理：合并内容到 `~/.orbit/orbit.json`，或删掉无用副本，或设置 `ORBIT_CONFIG_DIR` 指向唯一目录。
+2. **启动环境不同**：systemd / 桌面启动与终端里 **`HOME` 不一致**，会读到不同用户目录下的配置。
+3. **加密读写失败**：开启 `ORBIT_IS_ENC=1` 后若密钥与文件不匹配，读配置可能失败；**不要**在解密失败时用 UI 保存整段配置覆盖文件，以免覆盖加密内容。先恢复 `ORBIT_SECRET_KEY` 或暂时关闭加密再排查。
+4. **与「状态目录」混淆**：`ORBIT_STATE_DIR`（`~/.orbit` 等）管 agent 数据；**根配置**由上面列表与 `ORBIT_CONFIG_DIR` 决定，二者不一定在同一路径树下。
+
+启动时若检测到多个候选 `orbit.json`/`mw4agent.json`，进程会 **`warnings.warn` 一次** 说明正在使用哪一个、忽略了哪些。
+
+调试可执行：`python -c "from orbit.config.root import get_root_config_path, list_existing_root_config_files; print(get_root_config_path()); print(list_existing_root_config_files())"`。
+
+### 1.3 加密存储（ConfigManager）
 
 orbit 的配置读写走 `ConfigManager` + 加密框架：
 
@@ -264,12 +288,22 @@ run 级开关：
 `web_search` 工具的配置位于：
 
 - **`tools.web.search.enabled`**：是否启用并暴露给模型（当前默认 **false**，需要显式开启）
-- **`tools.web.search.provider`**：`brave`、`perplexity` 或 `serper`（可选；不填则按 key 自动选择：perplexity → brave → serper）
+- **`tools.web.search.provider`**：`brave`、`perplexity`、`serper` 或 `playwright`（可选；不填则按 key 自动选择：perplexity → brave → serper；**不会**自动选 `playwright`）
 - **`tools.web.search.apiKey`**：通用 key（可选；也兼容写成 `api_key`）
 - **`tools.web.search.brave.apiKey`**：Brave key（可选）
 - **`tools.web.search.perplexity.apiKey`**：Perplexity key（可选）
 - **`tools.web.search.serper.apiKey`**：Serper（google.serper.dev）key（可选；请求头 `X-API-KEY`）
-- **`tools.web.search.proxy`**：可选 HTTP(S) 代理 URL（如 `http://127.0.0.1:7890`）；也可写在 `tools.web.search.<provider>.proxy` 覆盖
+- **`tools.web.search.proxy`**：可选 HTTP(S) 代理 URL（如 `http://127.0.0.1:7890`）；也可写在 `tools.web.search.<provider>.proxy` 覆盖（**Playwright** 会将其传给浏览器 `launch(proxy=...)`，支持 `http`/`https`/`socks5`）
+- **`tools.web.search.playwright.*`**（仅 `provider=playwright`）：可选细项
+  - **`headless`**：是否无头（默认 `true`；也可写字符串 `"false"`）
+  - **`browser`**：`chromium` / `firefox` / `webkit`（默认 `chromium`）
+  - **`searchUrlTemplate`**：搜索 URL 模板，必须包含 `{query}`（默认 DuckDuckGo HTML：`https://html.duckduckgo.com/html/?q={query}`）。含 **`google.com`** 且带查询参数 `q=` 时走 **Google** 解析；含 **`bing.com`** 时走 **Bing** 解析
+  - **`fallbackToBingOnGoogleFailure`**：当 **Google** SERP 解析结果为 **0 条** 时，是否再打开 **Bing** 重试（默认 **`false`**：Google 无结果则直接返回空列表，不访问 Bing）
+  - **`timeoutMs`**：页面导航/等待超时毫秒数（默认取 `timeoutSeconds×1000`，且不少于 15000）
+  - **`locale`**、**`userAgent`**：浏览器上下文语言与 UA（可选）
+  - **`proxyUsername`** / **`proxyPassword`**：代理认证（可选；也可写在代理 URL 的 `user:pass@host` 中）
+
+依赖：需安装 `pip install 'orbit[playwright]'` 并在部署环境执行 `playwright install <browser>`（例如 `chromium`）。
 - **`tools.web.search.timeoutSeconds`**：请求超时（默认 10s）
 - **`tools.web.search.cacheTtlMinutes`**：缓存 TTL（默认 5min）
 - **`tools.web.search.maxResults`**：默认结果数（默认 5，上限 10）
@@ -315,6 +349,29 @@ Serper 示例：
         "provider": "serper",
         "proxy": "http://127.0.0.1:7890",
         "serper": { "apiKey": "YOUR_SERPER_KEY" }
+      }
+    }
+  }
+}
+```
+
+Playwright 示例（走系统或本地 HTTP 代理，无需搜索 API Key）：
+
+```json
+{
+  "tools": {
+    "web": {
+      "search": {
+        "enabled": true,
+        "provider": "playwright",
+        "proxy": "http://127.0.0.1:7890",
+        "timeoutSeconds": 45,
+        "playwright": {
+          "browser": "chromium",
+          "headless": true,
+          "proxyUsername": "",
+          "proxyPassword": ""
+        }
       }
     }
   }
@@ -393,7 +450,7 @@ Serper 示例：
 
 这些属于“运行时路径布局”，不在 root config 中配置：
 
-- **`ORBIT_STATE_DIR`**：状态目录（默认 `~/.orbit`）。未设置时会在已存在的 `~/.orbit` 与 `~/orbit` 中选一个，否则使用 `~/.orbit`；**不会**再自动选用旧的 `~/.mw4agent`，若仍需该目录请显式设置 `MW4AGENT_STATE_DIR`（或迁移数据到 `~/.orbit`）。
+- **`ORBIT_STATE_DIR`**：状态目录（默认 `~/.orbit`）。未设置时按顺序选用**已存在**的目录：`~/.orbit` → `~/.mw4agent`（旧版）→ `~/orbit`；若均不存在则默认 `~/.orbit`（新建时使用该路径）。仍可用 `MW4AGENT_STATE_DIR` 显式指向任意目录。
 - **`ORBIT_WORKSPACE_DIR`**：workspace 目录全局覆盖（默认 `~/.orbit/agents/<agentId>/workspace`，不建议轻易覆盖多 agent 情况）
 
 ### 7.1 Gateway 编排（orchestrator）与长期记忆路径

@@ -28,6 +28,7 @@ setup(
     # When HTTP_PROXY / HTTPS_PROXY use socks5:// or socks://, httpx needs socksio.
     extras_require={
         "socks": ["socksio>=1.0.0,<2"],
+        "playwright": ["playwright>=1.42.0,<2"],
     },
     # Ensure dashboard SPA static assets are installed with the package so that
     # FastAPI's StaticFiles mount in orbit.gateway.server can always find them.

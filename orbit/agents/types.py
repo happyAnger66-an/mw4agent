@@ -76,12 +76,18 @@ class AgentRunParams:
     sender_is_owner: Optional[bool] = None
     command_authorized: Optional[bool] = None
     images: Optional[List[Dict[str, Any]]] = None
-    """Workspace root for read/write/memory tools and transcript cwd when unset.
+    """Workspace root for skills snapshot, MEMORY bootstrap, memory tools, and transcript cwd when unset.
 
     Default: ``~/.orbit/agents/<agentId>/workspace`` (see resolve_agent_workspace_dir),
     or ``ORBIT_WORKSPACE_DIR`` when that env is set (global override).
     """
     workspace_dir: Optional[str] = None
+    """Optional override for **tool** filesystem/exec cwd only (e.g. orchestration shared project dir).
+
+    Does not replace ``workspace_dir`` for skills discovery or orchestration per-agent MEMORY layout;
+    when unset, tools use the same directory as ``workspace_dir`` (after sandbox rules).
+    """
+    tool_workspace_dir: Optional[str] = None
     """Reasoning visibility: off (hide) | on | stream. When on/stream, reasoning blocks are emitted and frontend may show them."""
     reasoning_level: Optional[str] = None
 

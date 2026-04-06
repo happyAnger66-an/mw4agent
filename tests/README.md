@@ -43,6 +43,17 @@
 
 ## 运行测试
 
+### Playwright `web_search` 实网（可选）
+
+需已安装 `orbit[playwright]`、`playwright install chromium`，且本机 **127.0.0.1:7890** 有 HTTP 代理（可用环境变量覆盖）：
+
+```bash
+ORBIT_WEB_SEARCH_LIVE=1 pytest tests/test_web_search_playwright_live.py -v
+# 可选：ORBIT_WEB_SEARCH_LIVE_PROXY=http://127.0.0.1:7890
+```
+
+未设置 `ORBIT_WEB_SEARCH_LIVE=1` 时该文件内用例会 **skip**，不影响默认 `pytest tests/`。
+
 ### 运行所有测试
 
 ```bash

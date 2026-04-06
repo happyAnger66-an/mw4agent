@@ -241,3 +241,128 @@ async def test_web_search_serper_parsing(monkeypatch):
     hdrs = {k: v for k, v in req0.header_items()}
     assert hdrs.get("X-api-key") == "serper_test_key"
 
+
+def test_playwright_proxy_dict_with_credentials():
+    from orbit.agents.tools import web_search_tool as w
+
+    d = w._build_playwright_proxy_dict("http://user:secret@127.0.0.1:8888", {})
+    assert d["server"] == "http://127.0.0.1:8888"
+    assert d["username"] == "user"
+    assert d["password"] == "secret"
+
+    d2 = w._build_playwright_proxy_dict("http://127.0.0.1:7890", {"proxyUsername": "u1", "proxyPassword": "p1"})
+    assert d2["server"] == "http://127.0.0.1:7890"
+    assert d2["username"] == "u1"
+    assert d2["password"] == "p1"
+
+
+def test_playwright_google_url_and_fallback_config():
+    from orbit.agents.tools import web_search_tool as w
+
+    assert w._playwright_url_is_google_search("https://www.google.com/search?q=test+query")
+    assert w._playwright_url_is_google_search("https://www.google.co.jp/search?q=a")
+    assert not w._playwright_url_is_google_search("https://www.bing.com/search?q=x")
+    assert not w._playwright_fallback_bing_on_google_failure({})
+    assert not w._playwright_fallback_bing_on_google_failure({"fallbackToBingOnGoogleFailure": False})
+    assert w._playwright_fallback_bing_on_google_failure({"fallbackToBingOnGoogleFailure": True})
+    assert w._playwright_fallback_bing_on_google_failure({"fallback_to_bing_on_google_failure": "true"})
+
+
+def test_normalize_search_result_url_ddg_redirect():
+    from orbit.agents.tools import web_search_tool as w
+
+    href = "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpath"
+    assert w._normalize_search_result_url(href) == "https://example.com/path"
+    assert w._normalize_search_result_url("https://direct.example/x") == "https://direct.example/x"
+
+
+@pytest.mark.asyncio
+async def test_web_search_playwright_mocked(monkeypatch):
+    from orbit.agents.tools.web_search_tool import WebSearchTool
+
+    captured: dict = {}
+
+    async def fake_impl(*, cfg, query, count, language, hl, timeout_s, proxy_url):
+        captured.update(
+            {"query": query, "count": count, "proxy_url": proxy_url, "hl": hl, "language": language}
+        )
+        return {
+            "query": query,
+            "provider": "playwright",
+            "count": 1,
+            "results": [
+                {
+                    "title": "x",
+                    "url": "https://r.example",
+                    "description": "",
+                    "published": None,
+                }
+            ],
+            "externalContent": {
+                "untrusted": True,
+                "source": "web_search",
+                "provider": "playwright",
+                "wrapped": True,
+            },
+        }
+
+    def _cfg(section, default=None):
+        if section == "tools":
+            return {
+                "web": {
+                    "search": {
+                        "enabled": True,
+                        "provider": "playwright",
+                        "proxy": "http://127.0.0.1:7890",
+                        "playwright": {"headless": True, "browser": "chromium"},
+                    }
+                }
+            }
+        return default
+
+    monkeypatch.setattr("orbit.agents.tools.web_search_tool.read_root_section", _cfg)
+    monkeypatch.setattr("orbit.agents.tools.web_search_tool._playwright_search_impl", fake_impl)
+
+    tool = WebSearchTool()
+    res = await tool.execute("tc_pw1", {"query": "hello world", "count": 3, "language": "zh"})
+    assert res.success is True
+    assert res.result["provider"] == "playwright"
+    assert res.result["count"] == 1
+    assert captured["proxy_url"] == "http://127.0.0.1:7890"
+    assert captured["query"] == "hello world"
+    assert captured["count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_web_search_playwright_import_error_surfaces(monkeypatch):
+    """Simulate missing/broken Playwright so behavior does not depend on CI having browsers."""
+    import sys
+    import types
+
+    from orbit.agents.tools.web_search_tool import WebSearchTool
+
+    removed = {}
+    for key in list(sys.modules):
+        if key == "playwright" or key.startswith("playwright."):
+            removed[key] = sys.modules.pop(key)
+
+    sys.modules["playwright"] = types.ModuleType("playwright")
+    sys.modules["playwright.async_api"] = types.ModuleType("playwright.async_api")
+
+    def _cfg(section, default=None):
+        if section == "tools":
+            return {"web": {"search": {"enabled": True, "provider": "playwright"}}}
+        return default
+
+    try:
+        monkeypatch.setattr("orbit.agents.tools.web_search_tool.read_root_section", _cfg)
+        tool = WebSearchTool()
+        res = await tool.execute("tc_pw2", {"query": "q"})
+        assert res.success is True
+        assert res.result.get("error") == "web_search_failed"
+        assert "playwright" in (res.result.get("message") or "").lower()
+    finally:
+        sys.modules.pop("playwright", None)
+        sys.modules.pop("playwright.async_api", None)
+        sys.modules.update(removed)
+

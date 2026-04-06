@@ -126,10 +126,38 @@ def _orch_state_path(orch_id: str) -> str:
 
 
 def _orch_agent_workspace(orch_id: str, agent_id: str) -> str:
-    """Isolated workspace for orchestration runs (MEMORY.md, tools cwd, memory index)."""
+    """Per-agent orchestration dir under state (MEMORY.md, skills snapshot, memory tools, transcripts)."""
     p = resolve_orchestration_agent_workspace_dir(orch_id, agent_id)
     os.makedirs(p, exist_ok=True)
     return p
+
+
+def _normalize_orch_workspace_root(raw: str) -> str:
+    """Resolve and validate a user-provided shared orchestration workspace directory (absolute path)."""
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError("workspace root path is empty")
+    p = Path(os.path.expanduser(s)).resolve()
+    if not p.exists():
+        raise ValueError(f"workspace root does not exist: {p}")
+    if not p.is_dir():
+        raise ValueError(f"workspace root is not a directory: {p}")
+    return str(p)
+
+
+def _orch_shared_tool_dir_optional(st: OrchState) -> Optional[str]:
+    """Optional shared **project** directory: exec/read/write cwd only (not skills/memory orch workspace)."""
+    shared = (getattr(st, "orchWorkspaceRoot", None) or "").strip()
+    if not shared:
+        return None
+    p = Path(shared)
+    try:
+        if p.is_dir():
+            return str(p.resolve())
+    except OSError:
+        pass
+    logger.warning("orchWorkspaceRoot missing or not a directory (tools cwd skipped): %s", shared)
+    return None
 
 
 def _strip_at_mentions(text: str) -> str:
@@ -192,6 +220,8 @@ class OrchState:
     # When True, append JSONL trace (inputs, tools, LLM rounds, outputs) under orchestrations/<id>/trace.jsonl
     orchTraceEnabled: bool = False
     orchTraceSeq: int = 0  # next seq for trace.jsonl rows
+    # Optional absolute directory on the gateway host: tool cwd / project artifacts only (not skills/MEMORY layout).
+    orchWorkspaceRoot: Optional[str] = None
 
 
 def collect_inspect_agent_ids(st: OrchState) -> List[str]:
@@ -720,6 +750,10 @@ class Orchestrator:
         rar_filtered = _filter_router_agent_roles_to_participants(
             router_agent_roles_loaded, parts_load
         )
+        owr_raw = data.get("orchWorkspaceRoot") or data.get("orch_workspace_root")
+        orch_workspace_root_loaded: Optional[str] = None
+        if isinstance(owr_raw, str) and owr_raw.strip():
+            orch_workspace_root_loaded = owr_raw.strip()
         return OrchState(
             orchId=str(data.get("orchId") or orch_id),
             sessionKey=str(data.get("sessionKey") or ""),
@@ -753,6 +787,7 @@ class Orchestrator:
             supervisorLastDecision=s_decision,
             orchTraceEnabled=orch_trace_on,
             orchTraceSeq=ots,
+            orchWorkspaceRoot=orch_workspace_root_loaded,
         )
 
     def get(self, orch_id: str) -> Optional[OrchState]:
@@ -890,6 +925,7 @@ class Orchestrator:
         supervisor_llm_max_retries: Optional[int] = None,
         orch_reply_language: Optional[str] = None,
         orch_trace_enabled: bool = False,
+        orch_workspace_root: Optional[str] = None,
     ) -> OrchState:
         orch_id = str(uuid.uuid4())
         strat = (strategy or "round_robin").strip() or "round_robin"
@@ -992,6 +1028,8 @@ class Orchestrator:
             st.supervisorLlm = None
             st.supervisorMaxIterations = 5
             st.supervisorLlmMaxRetries = 12
+        if orch_workspace_root and str(orch_workspace_root).strip():
+            st.orchWorkspaceRoot = _normalize_orch_workspace_root(str(orch_workspace_root))
         self._save(st)
         return st
 
@@ -1142,6 +1180,24 @@ class Orchestrator:
             st.orchReplyLanguage = _normalize_orch_reply_language(orch_reply_language)
         if orch_trace_enabled is not None:
             st.orchTraceEnabled = bool(orch_trace_enabled)
+        self._save(st)
+        return st
+
+    def set_workspace_root(self, orch_id: str, *, workspace_root: Optional[str]) -> OrchState:
+        """Set or clear the shared **tool/project** directory (artifacts cwd); not the skills/MEMORY workspace."""
+        oid = (orch_id or "").strip()
+        if not oid:
+            raise ValueError("orchId is required")
+        st = self._load(oid)
+        if not st:
+            raise ValueError("orchestration not found")
+        if (st.status or "").strip() == "running":
+            raise ValueError("orchestration is running")
+        wr = (workspace_root or "").strip()
+        if not wr:
+            st.orchWorkspaceRoot = None
+        else:
+            st.orchWorkspaceRoot = _normalize_orch_workspace_root(wr)
         self._save(st)
         return st
 
@@ -1329,6 +1385,7 @@ class Orchestrator:
 
                     cfg = self.agent_manager.get_or_create(agent_id)
                     workspace_dir = _orch_agent_workspace(orch_id, agent_id)
+                    tool_cwd = _orch_shared_tool_dir_optional(st)
                     bootstrap = load_bootstrap_for_orchestration(cfg.workspace_dir, workspace_dir)
                     is_router_llm = (st.strategy or "").strip() == "router_llm"
                     orch_hint = (
@@ -1376,6 +1433,7 @@ class Orchestrator:
                         deliver=False,
                         extra_system_prompt=extra_system_prompt,
                         workspace_dir=workspace_dir,
+                        tool_workspace_dir=tool_cwd,
                         reasoning_level=self._reasoning_level_for_orch(st),
                     )
                     result = await self._runner_execute_orch_turn(
@@ -1567,6 +1625,7 @@ class Orchestrator:
                     st.agentSessions[agent_id] = session_id
                     cfg = self.agent_manager.get_or_create(agent_id)
                     workspace_dir = _orch_agent_workspace(orch_id, agent_id)
+                    tool_cwd = _orch_shared_tool_dir_optional(st)
                     bootstrap = load_bootstrap_for_orchestration(cfg.workspace_dir, workspace_dir)
                     orch_hint = (
                         "You are part of a multi-agent supervisor pipeline orchestration.\n"
@@ -1591,6 +1650,7 @@ class Orchestrator:
                         deliver=False,
                         extra_system_prompt=extra_system_prompt,
                         workspace_dir=workspace_dir,
+                        tool_workspace_dir=tool_cwd,
                         reasoning_level=self._reasoning_level_for_orch(st),
                     )
                     result = await self._runner_execute_orch_turn(
@@ -1728,6 +1788,7 @@ class Orchestrator:
 
         cfg = self.agent_manager.get_or_create(agent_id)
         workspace_dir = _orch_agent_workspace(orch_id, agent_id)
+        tool_cwd = _orch_shared_tool_dir_optional(st)
         bootstrap = load_bootstrap_for_orchestration(cfg.workspace_dir, workspace_dir)
         orch_hint = (
             "You are part of a multi-agent DAG orchestration.\n"
@@ -1747,6 +1808,7 @@ class Orchestrator:
             deliver=False,
             extra_system_prompt=extra_system_prompt,
             workspace_dir=workspace_dir,
+            tool_workspace_dir=tool_cwd,
             reasoning_level=rl,
         )
         result = await self._runner_execute_orch_turn(

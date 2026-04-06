@@ -4,9 +4,11 @@ Currently implemented providers:
 - Brave Search API (https://api.search.brave.com/res/v1/web/search)
 - Perplexity Search API (https://api.perplexity.ai/search)
 - Serper Google Search API (https://google.serper.dev/search)
+- Playwright (HTML SERP scrape; optional extra `orbit[playwright]`, then `playwright install chromium`)
 
 Design notes:
-- Requires API key (config or env).
+- API providers require a key (config or env). Playwright needs explicit `provider: playwright` and no API key.
+- Playwright `searchUrlTemplate` selects the engine (DDG/Bing/Google by URL). Google with zero parsed rows does not use Bing unless `fallbackToBingOnGoogleFailure` is true.
 - Optional HTTP(S) proxy via `tools.web.search.proxy` / per-provider `proxy` or env.
 - Wraps external content with a clear untrusted boundary.
 - Uses an in-memory cache with TTL to avoid repeated external calls.
@@ -14,6 +16,7 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -451,13 +454,587 @@ def _serper_search(
     }
 
 
+def _read_playwright_subcfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    sub = cfg.get("playwright")
+    return sub if isinstance(sub, dict) else {}
+
+
+def _build_playwright_proxy_dict(proxy_url: str, sub: Dict[str, Any]) -> Dict[str, Any]:
+    """Map HTTP(S)/SOCKS proxy URL to Playwright launch `proxy` option."""
+    raw = (proxy_url or "").strip()
+    if not raw:
+        raise ValueError("empty proxy URL")
+    parsed = urllib.parse.urlparse(raw)
+    if not parsed.scheme or not parsed.hostname:
+        raise ValueError("invalid proxy URL (need scheme and host)")
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https", "socks5"):
+        raise ValueError(f"unsupported proxy scheme for Playwright: {scheme}")
+    port = parsed.port
+    if port is None:
+        default = {"http": 80, "https": 443, "socks5": 1080}
+        port = int(default.get(scheme, 80))
+    server = f"{scheme}://{parsed.hostname}:{port}"
+    out: Dict[str, Any] = {"server": server}
+    u = sub.get("proxyUsername") or sub.get("proxy_username") or (parsed.username or "")
+    p = sub.get("proxyPassword") or sub.get("proxy_password") or (parsed.password or "")
+    if isinstance(u, str) and u.strip():
+        out["username"] = urllib.parse.unquote(u.strip())
+    if isinstance(p, str) and p.strip():
+        out["password"] = urllib.parse.unquote(p.strip())
+    return out
+
+
+def _normalize_search_result_url(href: Optional[str]) -> str:
+    """Resolve DuckDuckGo redirect links to target URL when possible."""
+    if not href or not isinstance(href, str):
+        return ""
+    h = href.strip()
+    if not h:
+        return ""
+    if h.startswith("//"):
+        h = "https:" + h
+    if "uddg=" not in h:
+        return h
+    try:
+        parsed = urllib.parse.urlparse(h)
+        qs = urllib.parse.parse_qs(parsed.query)
+        uddg = (qs.get("uddg") or [None])[0]
+        if uddg:
+            return urllib.parse.unquote(uddg)
+    except Exception:
+        pass
+    return h
+
+
+def _playwright_ddg_kl(language: Optional[str], hl: Optional[str]) -> Optional[str]:
+    """Best-effort DuckDuckGo `kl` region/lang from tool params."""
+    code = (hl or language or "").strip().lower().replace("_", "-")
+    if not code:
+        return None
+    # Common mappings; unknown codes are passed through for DDG to interpret.
+    if code in ("zh", "zh-cn", "zh-hans", "cn"):
+        return "zh_CN"
+    if code in ("zh-tw", "zh-hant", "tw", "hk"):
+        return "zh_TW"
+    if code == "en":
+        return "en_US"
+    if len(code) == 2:
+        return code
+    return code
+
+
+def _playwright_search_url(
+    query: str,
+    template: str,
+    language: Optional[str],
+    hl: Optional[str],
+) -> str:
+    t = (template or "").strip() or "https://html.duckduckgo.com/html/?q={query}"
+    q_enc = urllib.parse.quote(query, safe="")
+    url = t.replace("{query}", q_enc)
+    kl = _playwright_ddg_kl(language, hl)
+    if kl and "duckduckgo.com" in url.lower() and "kl=" not in url.lower():
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}{urllib.parse.urlencode({'kl': kl})}"
+    return url
+
+
+def _playwright_url_is_google_search(url: str) -> bool:
+    """True when URL targets Google web search (organic SERP), not Maps/News-only."""
+    try:
+        p = urllib.parse.urlparse((url or "").strip())
+        host = (p.hostname or "").lower()
+        path = p.path or ""
+        q = p.query or ""
+    except Exception:
+        return False
+    if "google." not in host:
+        return False
+    if "q=" not in q.lower():
+        return False
+    if path.startswith("/maps"):
+        return False
+    return True
+
+
+def _playwright_fallback_bing_on_google_failure(sub: Dict[str, Any]) -> bool:
+    """When Google SERP yields zero rows, whether to open Bing once. Default: false (fail empty)."""
+    v = sub.get("fallbackToBingOnGoogleFailure")
+    if v is None:
+        v = sub.get("fallback_to_bing_on_google_failure")
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return False
+
+
+def _bing_row_appends_result(title: str, url0: str, snippet: str) -> Dict[str, Any]:
+    return {
+        "title": _wrap_untrusted(title) if title else "",
+        "url": url0,
+        "description": _wrap_untrusted(snippet) if snippet else "",
+        "published": None,
+    }
+
+
+async def _playwright_extract_bing_serp(page: Any, limit: int, timeout_ms: int) -> list[Dict[str, Any]]:
+    """Parse organic links from Bing desktop SERP (markup varies by region/A-B tests)."""
+    out: list[Dict[str, Any]] = []
+    cap = min(int(timeout_ms), 25_000)
+
+    try:
+        await page.wait_for_load_state("load", timeout=cap)
+    except Exception:
+        pass
+    try:
+        await page.wait_for_load_state("networkidle", timeout=min(8_000, cap))
+    except Exception:
+        pass
+    try:
+        await page.wait_for_timeout(500)
+    except Exception:
+        pass
+    try:
+        await page.evaluate("window.scrollTo(0, Math.min(2400, document.body.scrollHeight))")
+    except Exception:
+        pass
+    try:
+        await page.wait_for_timeout(400)
+    except Exception:
+        pass
+
+    row_selectors = (
+        "#b_results > li.b_algo",
+        "#b_results li.b_algo",
+        "ol#b_results > li.b_algo",
+        "li.b_algo",
+    )
+    rows: list[Any] = []
+    for sel in row_selectors:
+        rows = await page.locator(sel).all()
+        if rows:
+            break
+
+    async def extract_from_row(el: Any) -> Optional[Dict[str, Any]]:
+        title = ""
+        url0 = ""
+        base = page.url
+        for link_sel in ("h2 a", "h2 a.b_title_link", ".b_title h2 a", "a.tilk"):
+            link = el.locator(link_sel).first
+            if await link.count() == 0:
+                continue
+            title = (await link.inner_text()).strip()
+            href = (await link.get_attribute("href")) or ""
+            href = href.strip()
+            if not href or href.startswith("#"):
+                continue
+            if href.startswith("//"):
+                href = "https:" + href
+            elif href.startswith("/"):
+                href = urllib.parse.urljoin(base, href)
+            if "bing.com/ck/a" in href or "/ck/a?" in href:
+                url0 = href
+            elif href.startswith("http") and "bing.com/search" not in href.split("?")[0]:
+                url0 = href
+            elif href.startswith("http"):
+                url0 = href
+            else:
+                continue
+            break
+        if not url0:
+            return None
+        snippet = ""
+        for cap_sel in ("div.b_caption p", "p.b_lineclamp2", ".b_algoSlug", "div.b_caption"):
+            cap_el = el.locator(cap_sel).first
+            if await cap_el.count() > 0:
+                snippet = (await cap_el.inner_text()).strip()
+                if snippet:
+                    break
+        return _bing_row_appends_result(title, url0, snippet)
+
+    for el in rows:
+        if len(out) >= limit:
+            break
+        row = await extract_from_row(el)
+        if row:
+            out.append(row)
+
+    if len(out) >= limit:
+        return out[:limit]
+
+    # DOM evaluate fallback when class names change (esp. intl / Copilot experiments).
+    if len(out) == 0:
+        try:
+            raw = await page.evaluate(
+                """(lim) => {
+                  const out = [];
+                  const root = document.querySelector('#b_results') || document;
+                  const items = root.querySelectorAll('li.b_algo, li[class*="b_algo"], #b_results > li');
+                  items.forEach((li) => {
+                    if (out.length >= lim) return;
+                    const a = li.querySelector('h2 a, h2 a.b_title_link, .b_title a');
+                    if (!a || !a.href) return;
+                    let p = '';
+                    const cap = li.querySelector('div.b_caption p, p.b_lineclamp2, .b_algoSlug');
+                    if (cap) p = (cap.innerText || '').trim();
+                    out.push({ title: (a.innerText || '').trim(), url: a.href, snippet: p });
+                  });
+                  return out;
+                }""",
+                limit,
+            )
+        except Exception:
+            raw = []
+        if isinstance(raw, list):
+            for item in raw:
+                if len(out) >= limit:
+                    break
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                url0 = str(item.get("url") or "").strip()
+                snippet = str(item.get("snippet") or "").strip()
+                if not url0:
+                    continue
+                out.append(_bing_row_appends_result(title, url0, snippet))
+
+    # Last resort: any h2 links under #b_results (layout without li.b_algo).
+    if len(out) == 0:
+        try:
+            raw2 = await page.evaluate(
+                """(lim) => {
+                  const out = [];
+                  const seen = new Set();
+                  document.querySelectorAll('#b_results h2 a').forEach((a) => {
+                    if (out.length >= lim) return;
+                    if (!a.href || seen.has(a.href)) return;
+                    const u = a.href;
+                    if (u.includes('bing.com/maps')) return;
+                    seen.add(u);
+                    const t = (a.innerText || '').trim();
+                    if (!t) return;
+                    out.push({ title: t, url: u, snippet: '' });
+                  });
+                  return out;
+                }""",
+                limit,
+            )
+        except Exception:
+            raw2 = []
+        if isinstance(raw2, list):
+            for item in raw2:
+                if len(out) >= limit:
+                    break
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                url0 = str(item.get("url") or "").strip()
+                snippet = str(item.get("snippet") or "").strip()
+                if not url0:
+                    continue
+                out.append(_bing_row_appends_result(title, url0, snippet))
+
+    return out[:limit]
+
+
+async def _playwright_extract_google_serp(page: Any, limit: int, timeout_ms: int) -> list[Dict[str, Any]]:
+    """Parse organic links from Google web SERP (markup varies; best-effort)."""
+    out: list[Dict[str, Any]] = []
+    cap = min(int(timeout_ms), 25_000)
+    try:
+        await page.wait_for_load_state("load", timeout=cap)
+    except Exception:
+        pass
+    try:
+        await page.wait_for_load_state("networkidle", timeout=min(8_000, cap))
+    except Exception:
+        pass
+    try:
+        await page.wait_for_timeout(500)
+    except Exception:
+        pass
+    try:
+        await page.evaluate("window.scrollTo(0, Math.min(2400, document.body.scrollHeight))")
+    except Exception:
+        pass
+    try:
+        await page.wait_for_timeout(400)
+    except Exception:
+        pass
+
+    try:
+        raw = await page.evaluate(
+            """(lim) => {
+              const out = [];
+              const seen = new Set();
+              const blocks = document.querySelectorAll('div.g, div[data-sokoban-container], div[data-hveid]');
+              blocks.forEach((block) => {
+                if (out.length >= lim) return;
+                const h3 = block.querySelector('h3');
+                const a = h3 && h3.closest('a') ? h3.closest('a') : block.querySelector('a[href^="http"]');
+                if (!a || !a.href) return;
+                let url = a.href;
+                if (url.includes('google.com/search?')) return;
+                if (url.includes('webcache.googleusercontent.com')) return;
+                if (seen.has(url)) return;
+                const title = (h3 ? h3.innerText : (a.innerText || '')).trim();
+                if (!title) return;
+                seen.add(url);
+                let snippet = '';
+                const sp = block.querySelector('.VwiC3b, .lyLwlc, .IsZvec, span[style]');
+                if (sp) snippet = (sp.innerText || '').trim();
+                out.push({ title, url, snippet });
+              });
+              return out;
+            }""",
+            limit,
+        )
+    except Exception:
+        raw = []
+    if isinstance(raw, list):
+        for item in raw:
+            if len(out) >= limit:
+                break
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            url0 = str(item.get("url") or "").strip()
+            snippet = str(item.get("snippet") or "").strip()
+            if not url0:
+                continue
+            out.append(_bing_row_appends_result(title, url0, snippet))
+
+    if len(out) >= limit:
+        return out[:limit]
+
+    if len(out) == 0:
+        try:
+            raw2 = await page.evaluate(
+                """(lim) => {
+                  const out = [];
+                  const seen = new Set();
+                  document.querySelectorAll('#search #rso a h3, #rso a h3').forEach((h3) => {
+                    if (out.length >= lim) return;
+                    const a = h3.closest('a');
+                    if (!a || !a.href) return;
+                    if (a.href.includes('google.com/search?')) return;
+                    if (seen.has(a.href)) return;
+                    seen.add(a.href);
+                    const t = (h3.innerText || '').trim();
+                    if (!t) return;
+                    out.push({ title: t, url: a.href, snippet: '' });
+                  });
+                  return out;
+                }""",
+                limit,
+            )
+        except Exception:
+            raw2 = []
+        if isinstance(raw2, list):
+            for item in raw2:
+                if len(out) >= limit:
+                    break
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                url0 = str(item.get("url") or "").strip()
+                snippet = str(item.get("snippet") or "").strip()
+                if not url0:
+                    continue
+                out.append(_bing_row_appends_result(title, url0, snippet))
+
+    return out[:limit]
+
+
+async def _playwright_search_impl(
+    *,
+    cfg: Dict[str, Any],
+    query: str,
+    count: int,
+    language: Optional[str],
+    hl: Optional[str],
+    timeout_s: int,
+    proxy_url: Optional[str],
+) -> Dict[str, Any]:
+    try:
+        from playwright.async_api import async_playwright  # type: ignore[import-not-found]
+    except ImportError as e:
+        raise RuntimeError(
+            "playwright is not installed. Install with: pip install 'orbit[playwright]' "
+            "then run: playwright install chromium"
+        ) from e
+
+    sub = _read_playwright_subcfg(cfg)
+    headless = sub.get("headless")
+    if headless is None:
+        headless = True
+    elif isinstance(headless, str):
+        headless = headless.strip().lower() not in ("0", "false", "no", "off")
+    else:
+        headless = bool(headless)
+    browser_name = str(sub.get("browser") or "chromium").strip().lower()
+    if browser_name not in ("chromium", "firefox", "webkit"):
+        browser_name = "chromium"
+
+    nav_timeout_ms = sub.get("timeoutMs") or sub.get("timeout_ms")
+    if isinstance(nav_timeout_ms, int) and nav_timeout_ms > 0:
+        timeout_ms = nav_timeout_ms
+    else:
+        timeout_ms = max(int(timeout_s) * 1000, 15_000)
+
+    template = str(sub.get("searchUrlTemplate") or sub.get("search_url_template") or "").strip()
+    search_url = _playwright_search_url(query, template, language, hl)
+
+    user_agent = sub.get("userAgent") or sub.get("user_agent")
+    if not isinstance(user_agent, str) or not user_agent.strip():
+        user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+
+    locale = str(sub.get("locale") or "en-US").strip() or "en-US"
+
+    launch_kwargs: Dict[str, Any] = {"headless": bool(headless)}
+    # Chromium-only flags; Firefox/WebKit reject unknown launch args.
+    if browser_name == "chromium":
+        launch_kwargs["args"] = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ]
+        extra_launch_args = sub.get("chromiumArgs") or sub.get("chromium_args")
+        if isinstance(extra_launch_args, list):
+            for a in extra_launch_args:
+                if isinstance(a, str) and a.strip():
+                    launch_kwargs["args"].append(a.strip())
+    if proxy_url and str(proxy_url).strip():
+        launch_kwargs["proxy"] = _build_playwright_proxy_dict(str(proxy_url).strip(), sub)
+
+    results: list[Dict[str, Any]] = []
+    is_bing_first = "bing.com" in search_url.lower()
+    is_google_first = _playwright_url_is_google_search(search_url)
+    fallback_bing_if_google_empty = _playwright_fallback_bing_on_google_failure(sub)
+
+    async def _append_ddg_results(page: Any, limit: int) -> None:
+        items: list[Any] = []
+        for sel in ("div.result.results_links", "div.result", "div.web-result"):
+            items = await page.locator(sel).all()
+            if items:
+                break
+        for el in items:
+            if len(results) >= limit:
+                break
+            link = el.locator("a.result__a").first
+            if await link.count() == 0:
+                continue
+            title = (await link.inner_text()).strip()
+            href = await link.get_attribute("href")
+            url0 = _normalize_search_result_url(href)
+            snippet = ""
+            sn = el.locator(".result__snippet, a.result__snippet").first
+            if await sn.count() > 0:
+                snippet = (await sn.inner_text()).strip()
+            if not title and not url0:
+                continue
+            results.append(
+                {
+                    "title": _wrap_untrusted(title) if title else "",
+                    "url": url0,
+                    "description": _wrap_untrusted(snippet) if snippet else "",
+                    "published": None,
+                }
+            )
+        # Flat fallback: some DDG layouts omit div.result wrappers.
+        if len(results) == 0:
+            for link in await page.locator("a.result__a").all():
+                if len(results) >= limit:
+                    break
+                title = (await link.inner_text()).strip()
+                href = await link.get_attribute("href")
+                url0 = _normalize_search_result_url(href)
+                if not title and not url0:
+                    continue
+                results.append(
+                    {
+                        "title": _wrap_untrusted(title) if title else "",
+                        "url": url0,
+                        "description": "",
+                        "published": None,
+                    }
+                )
+
+    async with async_playwright() as p:
+        browser_type = getattr(p, browser_name)
+        browser = await browser_type.launch(**launch_kwargs)
+        try:
+            context = await browser.new_context(
+                locale=locale,
+                user_agent=user_agent.strip(),
+                viewport={"width": 1280, "height": 720},
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+                },
+            )
+            page = await context.new_page()
+            _first_load = "load" if (is_bing_first or is_google_first) else "domcontentloaded"
+            await page.goto(search_url, wait_until=_first_load, timeout=timeout_ms)
+            try:
+                await page.wait_for_selector(
+                    "#b_results, #search, #rso, .result, .results_links, li.b_algo, a.result__a, div.g",
+                    timeout=min(18_000, timeout_ms),
+                )
+            except Exception:
+                pass
+
+            is_bing = is_bing_first
+
+            if is_bing:
+                results.extend(await _playwright_extract_bing_serp(page, count, timeout_ms))
+            elif is_google_first:
+                results.extend(await _playwright_extract_google_serp(page, count, timeout_ms))
+                if len(results) == 0 and fallback_bing_if_google_empty:
+                    bing_q = urllib.parse.quote(query, safe="")
+                    bing_url = f"https://www.bing.com/search?q={bing_q}"
+                    try:
+                        await page.goto(bing_url, wait_until="load", timeout=timeout_ms)
+                        await page.wait_for_selector("#b_results, li.b_algo", timeout=min(20_000, timeout_ms))
+                    except Exception:
+                        pass
+                    results.extend(await _playwright_extract_bing_serp(page, count, timeout_ms))
+            else:
+                await _append_ddg_results(page, count)
+                # DDG often blocks headless or changes markup; Bing is a pragmatic fallback.
+                if len(results) == 0:
+                    bing_q = urllib.parse.quote(query, safe="")
+                    bing_url = f"https://www.bing.com/search?q={bing_q}"
+                    try:
+                        await page.goto(bing_url, wait_until="load", timeout=timeout_ms)
+                        await page.wait_for_selector("#b_results, li.b_algo", timeout=min(20_000, timeout_ms))
+                    except Exception:
+                        pass
+                    results.extend(await _playwright_extract_bing_serp(page, count, timeout_ms))
+        finally:
+            await browser.close()
+
+    return {
+        "query": query,
+        "provider": "playwright",
+        "count": len(results),
+        "results": results,
+        "externalContent": {"untrusted": True, "source": "web_search", "provider": "playwright", "wrapped": True},
+    }
+
+
 class WebSearchTool(AgentTool):
     def __init__(self) -> None:
         super().__init__(
             name="web_search",
             description=(
-                "Search the web. Supports multiple providers (brave, perplexity, serper). "
-                "Requires provider API key via env or tools.web.search config."
+                "Search the web. Supports multiple providers (brave, perplexity, serper, playwright). "
+                "API providers need a key via env or tools.web.search config; playwright is configured with "
+                "tools.web.search.provider=playwright (see docs)."
             ),
             parameters={
                 "type": "object",
@@ -493,26 +1070,32 @@ class WebSearchTool(AgentTool):
             return ToolResult(success=False, result={"error": "disabled"}, error="web_search is disabled")
 
         provider = _resolve_provider(cfg) or _auto_select_provider(cfg)
-        if provider not in ("brave", "perplexity", "serper"):
+        if provider not in ("brave", "perplexity", "serper", "playwright"):
             return ToolResult(
                 success=True,
                 result={
                     "error": "missing_web_search_provider",
-                    "message": "web_search needs tools.web.search.provider or a supported API key (BRAVE_API_KEY / PERPLEXITY_API_KEY / SERPER_API_KEY).",
-                    "supportedProviders": ["brave", "perplexity", "serper"],
+                    "message": (
+                        "web_search needs tools.web.search.provider or a supported API key "
+                        "(BRAVE_API_KEY / PERPLEXITY_API_KEY / SERPER_API_KEY), "
+                        "or provider playwright with pip extra orbit[playwright]."
+                    ),
+                    "supportedProviders": ["brave", "perplexity", "serper", "playwright"],
                 },
             )
-        api_key = _resolve_provider_api_key(cfg, provider)
-        if not api_key:
-            env_map = {"brave": "BRAVE_API_KEY", "perplexity": "PERPLEXITY_API_KEY", "serper": "SERPER_API_KEY"}
-            env_hint = env_map.get(provider, "tools.web.search.<provider>.apiKey")
-            return ToolResult(
-                success=True,
-                result={
-                    "error": f"missing_{provider}_api_key",
-                    "message": f"web_search({provider}) needs an API key ({env_hint} or tools.web.search.{provider}.apiKey / tools.web.search.apiKey).",
-                },
-            )
+
+        if provider != "playwright":
+            api_key = _resolve_provider_api_key(cfg, provider)
+            if not api_key:
+                env_map = {"brave": "BRAVE_API_KEY", "perplexity": "PERPLEXITY_API_KEY", "serper": "SERPER_API_KEY"}
+                env_hint = env_map.get(provider, "tools.web.search.<provider>.apiKey")
+                return ToolResult(
+                    success=True,
+                    result={
+                        "error": f"missing_{provider}_api_key",
+                        "message": f"web_search({provider}) needs an API key ({env_hint} or tools.web.search.{provider}.apiKey / tools.web.search.apiKey).",
+                    },
+                )
 
         query = _read_str(params, "query") or ""
         if not query.strip():
@@ -546,6 +1129,7 @@ class WebSearchTool(AgentTool):
 
         timeout_s = _resolve_timeout_s(cfg, context)
         ttl_s = _resolve_cache_ttl_s(cfg)
+        pw_sub = _read_playwright_subcfg(cfg) if provider == "playwright" else {}
         key = _cache_key(
             provider=provider,
             query=query,
@@ -562,6 +1146,14 @@ class WebSearchTool(AgentTool):
                 "hl": hl or "",
                 "page": page_param or 0,
                 "proxy": proxy or "",
+                "playwright": json.dumps(
+                    {k: pw_sub.get(k) for k in pw_sub}
+                    if provider == "playwright"
+                    else {},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ),
             },
         )
         now = _now_ms()
@@ -572,7 +1164,19 @@ class WebSearchTool(AgentTool):
             return ToolResult(success=True, result=cached)
 
         try:
-            if provider == "perplexity":
+            if provider == "playwright":
+                t_start = time.monotonic()
+                payload = await _playwright_search_impl(
+                    cfg=cfg,
+                    query=query,
+                    count=count,
+                    language=language,
+                    hl=hl,
+                    timeout_s=timeout_s,
+                    proxy_url=proxy,
+                )
+                payload["tookMs"] = int((time.monotonic() - t_start) * 1000)
+            elif provider == "perplexity":
                 payload = _perplexity_search(
                     api_key=api_key,
                     query=query,
@@ -585,6 +1189,7 @@ class WebSearchTool(AgentTool):
                     timeout_s=timeout_s,
                     proxy=proxy,
                 )
+                payload["tookMs"] = 0
             elif provider == "serper":
                 payload = _serper_search(
                     api_key=api_key,
@@ -596,6 +1201,7 @@ class WebSearchTool(AgentTool):
                     timeout_s=timeout_s,
                     proxy=proxy,
                 )
+                payload["tookMs"] = 0
             else:
                 payload = _brave_search(
                     api_key=api_key,
@@ -608,7 +1214,7 @@ class WebSearchTool(AgentTool):
                     timeout_s=timeout_s,
                     proxy=proxy,
                 )
-            payload["tookMs"] = 0  # best-effort; keep shape similar
+                payload["tookMs"] = 0
             payload["cache"] = {"hit": False, "ttlSeconds": ttl_s}
             _CACHE[key] = _CacheEntry(expires_at_ms=now + ttl_s * 1000, payload=payload)
             return ToolResult(success=True, result=payload)

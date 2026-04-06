@@ -21,6 +21,8 @@ from .orchestrator import Orchestrator
 
 # RPC responses are base64-encoded; keep zip small enough for typical gateways.
 MAX_ZIP_BYTES = 28 * 1024 * 1024
+# Encrypted bundles add a small header + auth tag; allow slightly larger wire payloads.
+MAX_BUNDLE_WIRE_BYTES = MAX_ZIP_BYTES + 64 * 1024
 _MAX_SINGLE_FILE_BYTES = 6 * 1024 * 1024
 _MAX_MD_FILES_ORCH_WS = 400
 _TRACE_MAX_BYTES = 8 * 1024 * 1024
@@ -111,14 +113,21 @@ def _add_orch_workspace_mds(zf: zipfile.ZipFile, arc_base: str, workspace: Path)
     return total
 
 
-def _readme_bytes(orch_id: str, name: str) -> bytes:
+def _readme_bytes(orch_id: str, name: str, *, secrets_redacted: bool) -> bytes:
+    key_line = (
+        "state (API keys redacted)"
+        if secrets_redacted
+        else "state (full secrets — use only inside password-encrypted export)"
+    )
+    zh_key = "密钥已脱敏" if secrets_redacted else "含完整密钥（仅应通过加密导出传递）"
     text = f"""Orbit orchestration dump
 orchId: {orch_id}
 name: {name or "(unnamed)"}
 
 Layout:
+  manifest.json              — export format metadata
   README.txt                 — this file
-  orchestration/orch.json    — state (API keys redacted)
+  orchestration/orch.json    — {key_line}
   orchestration/*.md         — team AGENTS.md if present
   orchestration/trace.jsonl  — run trace if present (may be truncated)
   agents/<agentId>/home_workspace/
@@ -129,7 +138,7 @@ Layout:
     Effective tool names and resolved skills catalog (same logic as desktop “inspect”)
 
 目录说明（中文）：
-  orchestration/ 下为编排根目录的 orch.json（密钥已脱敏）、团队 AGENTS.md、trace.jsonl。
+  orchestration/ 下为编排根目录的 orch.json（{zh_key}）、团队 AGENTS.md、trace.jsonl。
   agents/<智能体>/home_workspace/ 为该智能体在 ~/.orbit/agents/<id>/workspace 下的引导 md。
   agents/<智能体>/orchestration_workspace/ 为该智能体在本编排隔离工作区下的全部 .md。
   tools_skills.json 为当时可用的工具名与技能列表快照。
@@ -141,8 +150,12 @@ def build_orchestration_dump_zip(
     *,
     orch_id: str,
     orchestrator: Orchestrator,
+    redact_secrets: bool = True,
 ) -> Tuple[bytes, str]:
-    """Return (zip_bytes, suggested_filename). Raises ValueError on missing orch or oversize output."""
+    """Return (zip_bytes, suggested_filename). Raises ValueError on missing orch or oversize output.
+
+    When ``redact_secrets`` is False, ``orch.json`` retains API keys (for encrypted export only).
+    """
     oid = (orch_id or "").strip()
     if not oid:
         raise ValueError("orchId is required")
@@ -166,13 +179,32 @@ def build_orchestration_dump_zip(
     buf = io.BytesIO()
     total_uncompressed = 0
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        total_uncompressed += _add_bytes(zf, f"{top}/README.txt", _readme_bytes(oid, st.name or ""))
+        manifest = {
+            "formatVersion": 1,
+            "exportedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "sourceOrchId": oid,
+            "secretsRedacted": bool(redact_secrets),
+        }
+        total_uncompressed += _add_bytes(
+            zf,
+            f"{top}/manifest.json",
+            json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+        total_uncompressed += _add_bytes(
+            zf,
+            f"{top}/README.txt",
+            _readme_bytes(oid, st.name or "", secrets_redacted=redact_secrets),
+        )
 
         orch_json = orch_root / "orch.json"
         if orch_json.is_file():
             try:
                 raw = json.loads(orch_json.read_text(encoding="utf-8"))
-                red = _redact_secrets(raw) if isinstance(raw, dict) else raw
+                red = (
+                    _redact_secrets(raw)
+                    if (isinstance(raw, dict) and redact_secrets)
+                    else raw
+                )
                 payload = json.dumps(red, ensure_ascii=False, indent=2).encode("utf-8")
             except (OSError, json.JSONDecodeError):
                 payload = b'{"error":"could not parse orch.json"}\n'

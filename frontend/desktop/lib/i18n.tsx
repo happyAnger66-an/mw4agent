@@ -195,8 +195,28 @@ const en: Record<string, string> = {
   orchestrateInspectNoSkills: "(none)",
   orchestrateDump: "Export ZIP dump",
   orchestrateDumpRunning: "Exporting…",
+  orchestrateDumpPasswordPrompt:
+    "Export password (optional): leave empty for a redacted ZIP; enter a password to encrypt a bundle that keeps API keys (.orchbundle).",
+  orchestrateImport: "Import bundle",
+  orchestrateImportRunning: "Importing…",
+  orchestrateImportPasswordPrompt:
+    "Import password: required for encrypted .orchbundle; leave empty for plain ZIP.",
+  orchestrateImportDecryptFailed: "Wrong password or corrupted bundle.",
+  orchestrateImportPasswordRequired: "This file is encrypted — enter the export password.",
   orchestrateDumpTooLarge:
     "ZIP is too large for this export path (RPC size limit). Remove large .md files or trace, then retry.",
+  orchestrateWorkspaceRoot: "Shared workspace",
+  orchestrateWorkspaceRootHint:
+    "Absolute path on the gateway host for this run’s tool cwd and file artifacts (read/write/exec). Skills and orchestration MEMORY still use each agent’s workspace under state, not this path.",
+  orchestrateWorkspaceRootPlaceholder: "/path/to/project",
+  orchestrateWorkspaceRootApply: "Apply",
+  orchestrateWorkspaceRootClear: "Clear",
+  orchestrateWorkspaceWatch: "Files (live)",
+  orchestrateWorkspaceNoRoot: "Set a workspace path above to list and monitor files.",
+  orchestrateWorkspaceChanged: "changed",
+  orchestrateWorkspaceAdded: "added",
+  orchestrateWorkspaceRemoved: "removed",
+  orchestrateWorkspaceTruncated: "Listing truncated (max entries).",
 
   skillsTitle: "Skills",
   skillsSummary: "{count} skill(s) loaded",
@@ -536,8 +556,28 @@ const zhCN: Record<string, string> = {
   orchestrateInspectNoSkills: "（无）",
   orchestrateDump: "导出 ZIP",
   orchestrateDumpRunning: "导出中…",
+  orchestrateDumpPasswordPrompt:
+    "导出密码（可留空）：留空为脱敏 ZIP；填写密码则导出保留 API 密钥的加密包（.orchbundle）。",
+  orchestrateImport: "导入编排包",
+  orchestrateImportRunning: "导入中…",
+  orchestrateImportPasswordPrompt:
+    "导入密码：加密 .orchbundle 必填；普通 ZIP 可留空。",
+  orchestrateImportDecryptFailed: "密码错误或文件损坏。",
+  orchestrateImportPasswordRequired: "该文件已加密，请输入导出时使用的密码。",
   orchestrateDumpTooLarge:
     "压缩包超过当前 RPC 导出上限。请删减大型 .md 或 trace 后重试，或后续改用直连下载接口。",
+  orchestrateWorkspaceRoot: "共享工作目录",
+  orchestrateWorkspaceRootHint:
+    "填写网关所在机器上的绝对路径，作为本轮工具默认工作目录及文件类产物根目录（读/写/执行）。技能发现与各智能体编排 MEMORY 仍使用 state 下各自工作区，不使用此路径。",
+  orchestrateWorkspaceRootPlaceholder: "/path/to/project",
+  orchestrateWorkspaceRootApply: "应用",
+  orchestrateWorkspaceRootClear: "清除",
+  orchestrateWorkspaceWatch: "文件（实时）",
+  orchestrateWorkspaceNoRoot: "先在上方设置工作目录以列出并监控文件变更。",
+  orchestrateWorkspaceChanged: "变更",
+  orchestrateWorkspaceAdded: "新增",
+  orchestrateWorkspaceRemoved: "删除",
+  orchestrateWorkspaceTruncated: "列表已截断（达到条目上限）。",
 
   skillsTitle: "技能",
   skillsSummary: "已加载 {count} 个技能",

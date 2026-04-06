@@ -20,10 +20,14 @@ import {
   orchestrateReset,
   orchestrateInspectAgents,
   orchestrateDump,
+  orchestrateImportBundle,
+  arrayBufferToBase64,
   downloadZipFromBase64,
   orchestrateList,
   orchestrateSend,
   orchestrateUpdate,
+  orchestrateWorkspaceRootSet,
+  orchestrateWorkspaceScan,
   readOrchestrateWorkspaceFile,
   writeOrchestrateWorkspaceFile,
   testLlmConnection,
@@ -48,6 +52,11 @@ import {
   parseWsUsage,
 } from "@/lib/orchestrateContextUsage";
 import { useGatewayWs } from "@/lib/gateway-ws-context";
+
+/** Shared workspace path, live file list, per-agent token usage (section headers). */
+const ORCH_ICON_SHARED_WORKDIR = "/icons/workdir.png";
+const ORCH_ICON_WORKSPACE_FILES = "/icons/files.png";
+const ORCH_ICON_AGENT_TOKEN_USAGE = "/icons/cost.png";
 
 type ToolTraceRow = {
   id: string;
@@ -199,6 +208,8 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
     participants: string[];
     messages: OrchMessage[];
     dagProgress?: Record<string, { status?: string; outputPreview?: string; error?: string }>;
+    /** Gateway host path; agents use as tool cwd when set */
+    orchWorkspaceRoot?: string;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [participantsOpen, setParticipantsOpen] = useState(false);
@@ -264,6 +275,19 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
   const [inspectLoading, setInspectLoading] = useState(false);
   const [inspectAgents, setInspectAgents] = useState<OrchestrateInspectAgentRow[]>([]);
   const [dumpExporting, setDumpExporting] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const importFileRef = useRef<HTMLInputElement>(null);
+  const [workspaceDraft, setWorkspaceDraft] = useState("");
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [wsListEntries, setWsListEntries] = useState<
+    { relPath: string; isDir: boolean; mtimeMs: number; size: number }[]
+  >([]);
+  const [wsTruncated, setWsTruncated] = useState(false);
+  const [wsEvents, setWsEvents] = useState<{ path: string; kind: "added" | "removed" | "modified" }[]>(
+    []
+  );
+  const wsSnapRef = useRef<Map<string, { mtimeMs: number; size: number }>>(new Map());
+  const wsFirstScanRef = useRef(true);
   const [live, setLive] = useState<LiveRun | null>(null);
   const messagesWrapRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -536,6 +560,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
         participants: r.participants,
         messages: r.messages || [],
         dagProgress: r.dagProgress ?? undefined,
+        orchWorkspaceRoot: r.orchWorkspaceRoot,
       });
       const now = Date.now();
       if (now - lastListRefreshRef.current > 8000) {
@@ -569,6 +594,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
         participants: r.participants,
         messages: r.messages || [],
         dagProgress: r.dagProgress ?? undefined,
+        orchWorkspaceRoot: r.orchWorkspaceRoot,
       });
       setBusy(busyFromOrchestrateStatus(r.status));
       void loadOrches();
@@ -633,6 +659,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
           participants: g.participants,
           messages: g.messages || [],
           dagProgress: g.dagProgress ?? undefined,
+          orchWorkspaceRoot: g.orchWorkspaceRoot,
         });
         setBusy(busyFromOrchestrateStatus(g.status));
       }
@@ -1117,6 +1144,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
         participants: g.participants,
         messages: g.messages || [],
         dagProgress: g.dagProgress ?? undefined,
+        orchWorkspaceRoot: g.orchWorkspaceRoot,
       });
       setBusy(busyFromOrchestrateStatus(g.status));
     }
@@ -1142,10 +1170,12 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
   const doDumpZip = useCallback(async () => {
     const orchId = selectedOrchId.trim();
     if (!orchId) return;
+    const pwd = window.prompt(t("orchestrateDumpPasswordPrompt"), "");
+    if (pwd === null) return;
     setDumpExporting(true);
     setError(null);
     try {
-      const r = await orchestrateDump(orchId);
+      const r = await orchestrateDump(orchId, pwd.trim() ? pwd : undefined);
       if (!r.ok) {
         setError(
           r.errorCode === "payload_too_large"
@@ -1159,6 +1189,163 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
       setDumpExporting(false);
     }
   }, [selectedOrchId, t]);
+
+  const onImportFileChange = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (!file) return;
+      setImportBusy(true);
+      setError(null);
+      try {
+        const buf = await file.arrayBuffer();
+        const b64 = arrayBufferToBase64(buf);
+        const pw = window.prompt(t("orchestrateImportPasswordPrompt"), "");
+        if (pw === null) return;
+        const r = await orchestrateImportBundle(b64, { password: pw });
+        if (!r.ok) {
+          setError(
+            r.errorCode === "decrypt_failed"
+              ? t("orchestrateImportDecryptFailed")
+              : r.errorCode === "password_required"
+                ? t("orchestrateImportPasswordRequired")
+                : r.error || t("orchestrateError")
+          );
+          return;
+        }
+        await loadOrches();
+        setSelectedOrchId(r.orchId);
+      } finally {
+        setImportBusy(false);
+      }
+    },
+    [loadOrches, t]
+  );
+
+  useEffect(() => {
+    const id = selectedOrchId.trim();
+    if (!id) {
+      setWorkspaceDraft("");
+      wsFirstScanRef.current = true;
+      wsSnapRef.current = new Map();
+      setWsListEntries([]);
+      setWsEvents([]);
+      setWsTruncated(false);
+      return;
+    }
+    let cancelled = false;
+    void orchestrateGet(id).then((r) => {
+      if (cancelled || !r.ok) return;
+      setWorkspaceDraft(r.orchWorkspaceRoot ?? "");
+      wsFirstScanRef.current = true;
+      wsSnapRef.current = new Map();
+      setWsEvents([]);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedOrchId]);
+
+  useEffect(() => {
+    const id = selectedOrchId.trim();
+    const root = (selected?.orchWorkspaceRoot || "").trim();
+    if (!id || !root) {
+      setWsListEntries([]);
+      setWsTruncated(false);
+      wsFirstScanRef.current = true;
+      wsSnapRef.current = new Map();
+      return;
+    }
+    const tick = async () => {
+      const r = await orchestrateWorkspaceScan(id);
+      if (!r.ok || !r.root) {
+        setWsListEntries([]);
+        setWsTruncated(false);
+        return;
+      }
+      setWsListEntries(r.entries);
+      setWsTruncated(r.truncated);
+      const next = new Map<string, { mtimeMs: number; size: number }>();
+      for (const e of r.entries) {
+        next.set(e.relPath, { mtimeMs: e.mtimeMs, size: e.size });
+      }
+      if (wsFirstScanRef.current) {
+        wsFirstScanRef.current = false;
+        wsSnapRef.current = next;
+        return;
+      }
+      const prev = wsSnapRef.current;
+      const ev: { path: string; kind: "added" | "removed" | "modified" }[] = [];
+      for (const [k, v] of next) {
+        const o = prev.get(k);
+        if (!o) ev.push({ path: k, kind: "added" });
+        else if (o.mtimeMs !== v.mtimeMs || o.size !== v.size) ev.push({ path: k, kind: "modified" });
+      }
+      for (const k of prev.keys()) {
+        if (!next.has(k)) ev.push({ path: k, kind: "removed" });
+      }
+      wsSnapRef.current = next;
+      if (ev.length) setWsEvents((x) => [...ev, ...x].slice(0, 40));
+    };
+    void tick();
+    const tmr = window.setInterval(tick, 2500);
+    return () => window.clearInterval(tmr);
+  }, [selectedOrchId, selected?.orchWorkspaceRoot]);
+
+  const applyWorkspaceRoot = useCallback(async () => {
+    const id = selectedOrchId.trim();
+    if (!id) return;
+    if (busy || busyFromOrchestrateStatus(selected?.status || "")) return;
+    setWorkspaceBusy(true);
+    setError(null);
+    try {
+      const r = await orchestrateWorkspaceRootSet(id, workspaceDraft);
+      if (!r.ok) {
+        setError(r.error || t("orchestrateError"));
+        return;
+      }
+      setWorkspaceDraft(r.orchWorkspaceRoot ?? "");
+      const g = await orchestrateGet(id);
+      if (g.ok) {
+        setSelected((prev) =>
+          prev && prev.orchId === id ? { ...prev, orchWorkspaceRoot: g.orchWorkspaceRoot } : prev
+        );
+      }
+      wsFirstScanRef.current = true;
+      wsSnapRef.current = new Map();
+      setWsEvents([]);
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  }, [busy, selected?.status, selectedOrchId, workspaceDraft, t]);
+
+  const clearWorkspaceRoot = useCallback(async () => {
+    const id = selectedOrchId.trim();
+    if (!id) return;
+    if (busy || busyFromOrchestrateStatus(selected?.status || "")) return;
+    setWorkspaceBusy(true);
+    setError(null);
+    try {
+      const r = await orchestrateWorkspaceRootSet(id, "");
+      if (!r.ok) {
+        setError(r.error || t("orchestrateError"));
+        return;
+      }
+      setWorkspaceDraft("");
+      const g = await orchestrateGet(id);
+      if (g.ok) {
+        setSelected((prev) =>
+          prev && prev.orchId === id ? { ...prev, orchWorkspaceRoot: g.orchWorkspaceRoot } : prev
+        );
+      }
+      wsFirstScanRef.current = true;
+      wsSnapRef.current = new Map();
+      setWsListEntries([]);
+      setWsEvents([]);
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  }, [busy, selected?.status, selectedOrchId, t]);
 
   const selectedParticipants = useMemo(() => {
     const parts = selected?.participants ?? [];
@@ -1193,17 +1380,43 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
   return (
     <div className="flex h-full min-h-0 w-full">
       <div className="w-64 shrink-0 border-r border-[var(--border)] bg-[var(--panel)] p-3 flex flex-col gap-3">
+        <input
+          ref={importFileRef}
+          type="file"
+          accept=".zip,.orchbundle,application/zip"
+          className="hidden"
+          aria-hidden
+          onChange={onImportFileChange}
+        />
         <div className="flex items-center justify-between">
           <div className="text-sm font-semibold">{t("orchestrateTitle")}</div>
-          <button
-            type="button"
-            className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--panel)] hover:opacity-90 shrink-0"
-            title={t("orchestrateCreate")}
-            aria-label={t("orchestrateCreate")}
-            onClick={openCreate}
-          >
-            <Image src="/icons/add.png" alt="" width={20} height={20} className="h-5 w-5 object-contain" />
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              disabled={importBusy}
+              className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--panel)] hover:opacity-90 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+              title={importBusy ? t("orchestrateImportRunning") : t("orchestrateImport")}
+              aria-label={t("orchestrateImport")}
+              onClick={() => importFileRef.current?.click()}
+            >
+              <Image
+                src="/icons/import.png"
+                alt=""
+                width={20}
+                height={20}
+                className="h-5 w-5 object-contain"
+              />
+            </button>
+            <button
+              type="button"
+              className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--panel)] hover:opacity-90 shrink-0"
+              title={t("orchestrateCreate")}
+              aria-label={t("orchestrateCreate")}
+              onClick={openCreate}
+            >
+              <Image src="/icons/add.png" alt="" width={20} height={20} className="h-5 w-5 object-contain" />
+            </button>
+          </div>
         </div>
 
         <div className="space-y-2 min-h-0 flex-1">
@@ -1388,7 +1601,7 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
                   onClick={() => void doDumpZip()}
                 >
                   <Image
-                    src="/icons/snapshot.png"
+                    src="/icons/export.png"
                     alt=""
                     width={18}
                     height={18}
@@ -1423,9 +1636,115 @@ export function OrchestratePanel({ autoOpenKey = 0 }: { autoOpenKey?: number }) 
               </div>
             </div>
           ) : null}
+          {selectedOrchId ? (
+            <div className="mb-2 rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 py-2 space-y-2">
+              <div className="flex items-center gap-1.5 text-[10px] font-semibold text-[var(--muted)]">
+                <Image
+                  src={ORCH_ICON_SHARED_WORKDIR}
+                  alt=""
+                  width={16}
+                  height={16}
+                  className="h-4 w-4 object-contain shrink-0 opacity-90"
+                />
+                {t("orchestrateWorkspaceRoot")}
+              </div>
+              <p className="text-[9px] text-[var(--muted)] leading-snug">
+                {t("orchestrateWorkspaceRootHint")}
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  className="min-w-0 flex-1 rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-xs font-mono"
+                  placeholder={t("orchestrateWorkspaceRootPlaceholder")}
+                  value={workspaceDraft}
+                  onChange={(e) => setWorkspaceDraft(e.target.value)}
+                  disabled={
+                    workspaceBusy || busy || busyFromOrchestrateStatus(selected?.status || "")
+                  }
+                  spellCheck={false}
+                />
+                <button
+                  type="button"
+                  disabled={
+                    workspaceBusy || busy || busyFromOrchestrateStatus(selected?.status || "")
+                  }
+                  className="text-xs px-2 py-1.5 rounded-md border border-[var(--border)] bg-[var(--bg)] hover:opacity-90 disabled:opacity-40"
+                  onClick={() => void applyWorkspaceRoot()}
+                >
+                  {t("orchestrateWorkspaceRootApply")}
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    workspaceBusy || busy || busyFromOrchestrateStatus(selected?.status || "")
+                  }
+                  className="text-xs px-2 py-1.5 rounded-md border border-[var(--border)] bg-[var(--bg)] hover:opacity-90 disabled:opacity-40"
+                  onClick={() => void clearWorkspaceRoot()}
+                >
+                  {t("orchestrateWorkspaceRootClear")}
+                </button>
+              </div>
+              <div className="border-t border-[var(--border)] pt-2">
+                <div className="flex items-center gap-1.5 text-[10px] font-semibold text-[var(--muted)] mb-1">
+                  <Image
+                    src={ORCH_ICON_WORKSPACE_FILES}
+                    alt=""
+                    width={16}
+                    height={16}
+                    className="h-4 w-4 object-contain shrink-0 opacity-90"
+                  />
+                  {t("orchestrateWorkspaceWatch")}
+                </div>
+                {!selected?.orchWorkspaceRoot?.trim() ? (
+                  <p className="text-[9px] text-[var(--muted)]">{t("orchestrateWorkspaceNoRoot")}</p>
+                ) : (
+                  <>
+                    {wsTruncated ? (
+                      <p className="text-[9px] text-amber-600/90 mb-1">{t("orchestrateWorkspaceTruncated")}</p>
+                    ) : null}
+                    {wsEvents.length > 0 ? (
+                      <div className="text-[9px] font-mono text-[var(--muted)] mb-1 max-h-16 overflow-y-auto space-y-0.5">
+                        {wsEvents.slice(0, 12).map((ev, i) => (
+                          <div key={`${ev.path}-${i}-${ev.kind}`}>
+                            <span className="text-[var(--accent)]">
+                              {ev.kind === "added"
+                                ? t("orchestrateWorkspaceAdded")
+                                : ev.kind === "removed"
+                                  ? t("orchestrateWorkspaceRemoved")
+                                  : t("orchestrateWorkspaceChanged")}
+                            </span>{" "}
+                            {ev.path}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                    <div className="max-h-40 overflow-y-auto text-[10px] font-mono space-y-0.5 border border-[var(--border)] rounded-md p-2 bg-[var(--bg)]/40">
+                      {wsListEntries.length === 0 ? (
+                        <span className="text-[var(--muted)]">—</span>
+                      ) : (
+                        wsListEntries.map((e) => (
+                          <div key={e.relPath} className="truncate" title={e.relPath}>
+                            <span className="text-[var(--muted)]">{e.isDir ? "[dir] " : "[file] "}</span>
+                            {e.relPath}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          ) : null}
           {selectedOrchId && orchUsageRows.length > 0 ? (
             <div className="mb-2 rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 py-2">
-              <div className="text-[10px] font-semibold text-[var(--muted)] uppercase tracking-wide mb-1.5">
+              <div className="flex items-center gap-1.5 text-[10px] font-semibold text-[var(--muted)] uppercase tracking-wide mb-1.5">
+                <Image
+                  src={ORCH_ICON_AGENT_TOKEN_USAGE}
+                  alt=""
+                  width={16}
+                  height={16}
+                  className="h-4 w-4 object-contain shrink-0 opacity-90"
+                />
                 {t("orchestrateContextUsageTitle")}
               </div>
               <div className="flex flex-wrap gap-2">

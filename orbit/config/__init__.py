@@ -9,6 +9,7 @@ get_default_config_manager() returns a manager that reads/writes sections of tha
 from .manager import ConfigManager, get_default_config_manager
 from .root import (
     get_root_config_path,
+    list_existing_root_config_files,
     read_root_config,
     read_root_section,
     write_root_config,
@@ -19,6 +20,7 @@ __all__ = [
     "ConfigManager",
     "get_default_config_manager",
     "get_root_config_path",
+    "list_existing_root_config_files",
     "read_root_config",
     "read_root_section",
     "write_root_config",

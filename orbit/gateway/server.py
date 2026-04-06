@@ -184,6 +184,46 @@ def _resolve_orchestration_workspace_file_abs(orch_id: str, rel_path: str) -> tu
     return chosen, str(target)
 
 
+def _scan_orch_shared_workspace(root: Path, *, max_depth: int, max_entries: int) -> List[Dict[str, Any]]:
+    """Recursive listing under ``root`` for desktop UI (bounded depth + entry cap)."""
+    root = root.resolve()
+    if not root.is_dir():
+        return []
+    out: List[Dict[str, Any]] = []
+
+    def walk(p: Path, depth: int, rel: str) -> None:
+        nonlocal out
+        if len(out) >= max_entries:
+            return
+        try:
+            children = sorted(p.iterdir(), key=lambda x: x.name.lower())
+        except OSError:
+            return
+        for child in children:
+            if len(out) >= max_entries:
+                return
+            name = child.name
+            rel_path = f"{rel}/{name}" if rel else name
+            try:
+                st = child.stat()
+                is_dir = child.is_dir()
+            except OSError:
+                continue
+            out.append(
+                {
+                    "relPath": rel_path.replace("\\", "/"),
+                    "isDir": bool(is_dir),
+                    "mtimeMs": int(st.st_mtime * 1000),
+                    "size": 0 if is_dir else int(getattr(st, "st_size", 0) or 0),
+                }
+            )
+            if is_dir and depth + 1 < max_depth:
+                walk(child, depth + 1, rel_path)
+
+    walk(root, 0, "")
+    return out
+
+
 def _normalize_agent_id_for_runs(agent_id: Optional[str]) -> str:
     from ..config.paths import normalize_agent_id
 
@@ -1441,6 +1481,10 @@ def create_app(
             orch_trace_enabled_create = _param_bool_default(
                 params, "orchTraceEnabled", "orch_trace_enabled", default=False
             )
+            owr_create = params.get("orchWorkspaceRoot") or params.get("orch_workspace_root")
+            orch_workspace_root_create = (
+                str(owr_create).strip() if owr_create is not None and str(owr_create).strip() else None
+            )
             try:
                 st = orchestrator.create(
                     session_key=session_key,
@@ -1457,6 +1501,7 @@ def create_app(
                     supervisor_llm_max_retries=sup_llm_retries_int,
                     orch_reply_language=orch_reply_language_create,
                     orch_trace_enabled=orch_trace_enabled_create,
+                    orch_workspace_root=orch_workspace_root_create,
                 )
             except ValueError as e:
                 return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": str(e)}}
@@ -1660,26 +1705,51 @@ def create_app(
         if method == "orchestrate.dump":
             import base64
 
-            from .orch_dump import MAX_ZIP_BYTES, build_orchestration_dump_zip
+            from .orch_bundle_crypto import encrypt_bundle
+            from .orch_dump import MAX_BUNDLE_WIRE_BYTES, MAX_ZIP_BYTES, build_orchestration_dump_zip
 
             orch_id = str(params.get("orchId") or "").strip()
+            password = str(params.get("password") or "").strip()
             if not orch_id:
                 return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": "orchId is required"}}
             try:
-                raw, fname = build_orchestration_dump_zip(orch_id=orch_id, orchestrator=orchestrator)
+                raw_zip, fname = build_orchestration_dump_zip(
+                    orch_id=orch_id,
+                    orchestrator=orchestrator,
+                    redact_secrets=not bool(password),
+                )
             except ValueError as e:
                 msg = str(e)
                 code = "payload_too_large" if "exceeds limit" in msg else "invalid_request"
                 return {"id": req_id, "ok": False, "error": {"code": code, "message": msg}}
             except Exception as e:
                 return {"id": req_id, "ok": False, "error": {"code": "unavailable", "message": str(e)}}
-            if len(raw) > MAX_ZIP_BYTES:
+            if len(raw_zip) > MAX_ZIP_BYTES:
                 return {
                     "id": req_id,
                     "ok": False,
                     "error": {
                         "code": "payload_too_large",
                         "message": f"zip exceeds limit ({MAX_ZIP_BYTES} bytes); reduce workspace size",
+                    },
+                }
+            encrypted = False
+            raw = raw_zip
+            if password:
+                try:
+                    raw = encrypt_bundle(raw_zip, password)
+                except ValueError as e:
+                    return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": str(e)}}
+                encrypted = True
+                if fname.endswith(".zip"):
+                    fname = fname[:-4] + ".orchbundle"
+            if len(raw) > MAX_BUNDLE_WIRE_BYTES:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {
+                        "code": "payload_too_large",
+                        "message": f"bundle exceeds wire limit ({MAX_BUNDLE_WIRE_BYTES} bytes); reduce workspace size",
                     },
                 }
             b64 = base64.b64encode(raw).decode("ascii")
@@ -1691,6 +1761,90 @@ def create_app(
                     "filename": fname,
                     "zipBase64": b64,
                     "sizeBytes": len(raw),
+                    "encrypted": encrypted,
+                },
+            }
+
+        if method == "orchestrate.import_bundle":
+            import base64
+
+            from .orch_bundle_crypto import decrypt_bundle, is_encrypted_bundle
+            from .orch_dump import MAX_BUNDLE_WIRE_BYTES, MAX_ZIP_BYTES
+            from .orch_import import import_orchestration_bundle
+
+            raw_b64 = str(params.get("zipBase64") or "").strip()
+            password = str(params.get("password") or "")
+            restore_home = params.get("restoreHomeWorkspace") is True
+            if not raw_b64:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "invalid_request", "message": "zipBase64 is required"},
+                }
+            try:
+                wire = base64.b64decode(raw_b64)
+            except Exception as e:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "invalid_request", "message": f"invalid base64: {e}"},
+                }
+            if len(wire) > MAX_BUNDLE_WIRE_BYTES:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {
+                        "code": "payload_too_large",
+                        "message": f"bundle exceeds wire limit ({MAX_BUNDLE_WIRE_BYTES} bytes)",
+                    },
+                }
+            raw = wire
+            if is_encrypted_bundle(raw):
+                if not password.strip():
+                    return {
+                        "id": req_id,
+                        "ok": False,
+                        "error": {
+                            "code": "password_required",
+                            "message": "password is required for encrypted bundle",
+                        },
+                    }
+                try:
+                    raw = decrypt_bundle(raw, password)
+                except ValueError as e:
+                    return {
+                        "id": req_id,
+                        "ok": False,
+                        "error": {"code": "decrypt_failed", "message": str(e)},
+                    }
+            if len(raw) > MAX_ZIP_BYTES:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {
+                        "code": "payload_too_large",
+                        "message": f"zip exceeds limit ({MAX_ZIP_BYTES} bytes) after decrypt",
+                    },
+                }
+            try:
+                st = import_orchestration_bundle(
+                    orchestrator,
+                    raw,
+                    restore_home_workspace=restore_home,
+                )
+            except ValueError as e:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": str(e)}}
+            except Exception as e:
+                return {"id": req_id, "ok": False, "error": {"code": "unavailable", "message": str(e)}}
+            return {
+                "id": req_id,
+                "ok": True,
+                "payload": {
+                    "orchId": st.orchId,
+                    "name": getattr(st, "name", "") or "",
+                    "sessionKey": st.sessionKey,
+                    "status": st.status,
+                    "participants": list(st.participants or []),
                 },
             }
 
@@ -1751,8 +1905,91 @@ def create_app(
                 "orchReplyLanguage": getattr(st, "orchReplyLanguage", "auto"),
                 "orchTraceEnabled": bool(getattr(st, "orchTraceEnabled", False)),
                 "orchTraceSeq": int(getattr(st, "orchTraceSeq", 0) or 0),
+                "orchWorkspaceRoot": getattr(st, "orchWorkspaceRoot", None),
             }
             return {"id": req_id, "ok": True, "payload": payload}
+
+        if method == "orchestrate.workspace_root.set":
+            orch_id = str(params.get("orchId") or "").strip()
+            if not orch_id:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "invalid_request", "message": "orchId is required"},
+                }
+            raw_wr = params.get("orchWorkspaceRoot")
+            if raw_wr is None:
+                raw_wr = params.get("orch_workspace_root")
+            path_str = str(raw_wr).strip() if raw_wr is not None else ""
+            try:
+                st = orchestrator.set_workspace_root(orch_id, workspace_root=path_str or None)
+            except ValueError as e:
+                return {"id": req_id, "ok": False, "error": {"code": "invalid_request", "message": str(e)}}
+            return {
+                "id": req_id,
+                "ok": True,
+                "payload": {
+                    "orchId": st.orchId,
+                    "orchWorkspaceRoot": getattr(st, "orchWorkspaceRoot", None),
+                },
+            }
+
+        if method == "orchestrate.workspace.scan":
+            orch_id = str(params.get("orchId") or "").strip()
+            if not orch_id:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "invalid_request", "message": "orchId is required"},
+                }
+            st = orchestrator.get(orch_id)
+            if not st:
+                return {"id": req_id, "ok": False, "error": {"code": "not_found", "message": "orchestration not found"}}
+            root_s = (getattr(st, "orchWorkspaceRoot", None) or "").strip()
+            if not root_s:
+                return {
+                    "id": req_id,
+                    "ok": True,
+                    "payload": {"orchId": st.orchId, "root": None, "entries": [], "truncated": False},
+                }
+            try:
+                root = Path(root_s).expanduser().resolve()
+            except OSError as e:
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "invalid_request", "message": f"bad workspace path: {e}"},
+                }
+            if not root.is_dir():
+                return {
+                    "id": req_id,
+                    "ok": False,
+                    "error": {"code": "invalid_request", "message": "workspace root is not a directory"},
+                }
+            md = params.get("maxDepth") if "maxDepth" in params else params.get("max_depth")
+            me = params.get("maxEntries") if "maxEntries" in params else params.get("max_entries")
+            try:
+                max_depth = int(md) if md is not None and str(md).strip() else 6
+            except (TypeError, ValueError):
+                max_depth = 6
+            try:
+                max_entries = int(me) if me is not None and str(me).strip() else 800
+            except (TypeError, ValueError):
+                max_entries = 800
+            max_depth = max(0, min(32, max_depth))
+            max_entries = max(1, min(5000, max_entries))
+            entries = _scan_orch_shared_workspace(root, max_depth=max_depth, max_entries=max_entries)
+            truncated = len(entries) >= max_entries
+            return {
+                "id": req_id,
+                "ok": True,
+                "payload": {
+                    "orchId": st.orchId,
+                    "root": str(root),
+                    "entries": entries,
+                    "truncated": truncated,
+                },
+            }
 
         if method == "orchestrate.send":
             orch_id = str(params.get("orchId") or "").strip()

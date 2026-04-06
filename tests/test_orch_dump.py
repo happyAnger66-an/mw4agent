@@ -74,3 +74,7 @@ def test_dump_zip_includes_orchestration_and_agent_paths(orch: Orchestrator) -> 
     data = json.loads(zf.read(next(n for n in names if n.endswith("/agents/main/tools_skills.json"))))
     assert data["agentId"] == "main"
     assert isinstance(data["tools"], list)
+    man = json.loads(zf.read(next(n for n in names if n.endswith("/manifest.json"))))
+    assert man.get("formatVersion") == 1
+    assert man.get("sourceOrchId") == oid
+    assert man.get("secretsRedacted") is True

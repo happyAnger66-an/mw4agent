@@ -790,6 +790,8 @@ export type OrchestrateCreateBody = {
   supervisorLlmMaxRetries?: number;
   orchReplyLanguage?: OrchestrateReplyLanguage;
   orchTraceEnabled?: boolean;
+  /** Absolute path on the gateway host; all agents use it as tool cwd when set. */
+  orchWorkspaceRoot?: string;
   idempotencyKey: string;
 };
 
@@ -815,6 +817,9 @@ export async function orchestrateCreate(
     supervisorLlmMaxRetries: body.supervisorLlmMaxRetries,
     ...(body.orchReplyLanguage != null ? { orchReplyLanguage: body.orchReplyLanguage } : {}),
     ...(body.orchTraceEnabled === true ? { orchTraceEnabled: true } : {}),
+    ...(body.orchWorkspaceRoot != null && String(body.orchWorkspaceRoot).trim()
+      ? { orchWorkspaceRoot: String(body.orchWorkspaceRoot).trim() }
+      : {}),
     idempotencyKey: body.idempotencyKey,
   });
   if (!r.ok || !r.payload) {
@@ -964,12 +969,25 @@ export async function orchestrateInspectAgents(orchId: string): Promise<Orchestr
 }
 
 export type OrchestrateDumpResult =
-  | { ok: true; orchId: string; filename: string; zipBase64: string; sizeBytes: number }
+  | {
+      ok: true;
+      orchId: string;
+      filename: string;
+      zipBase64: string;
+      sizeBytes: number;
+      encrypted?: boolean;
+    }
   | { ok: false; error?: string; errorCode?: string };
 
-/** ZIP export: orch state (redacted), team MDs, per-agent workspaces, tools/skills JSON. */
-export async function orchestrateDump(orchId: string): Promise<OrchestrateDumpResult> {
-  const r = await callRpc("orchestrate.dump", { orchId: orchId.trim() });
+/** ZIP export: orch state (redacted by default), team MDs, per-agent workspaces, tools/skills JSON. Pass ``password`` to export full secrets inside an AES-GCM encrypted ``.orchbundle``. */
+export async function orchestrateDump(
+  orchId: string,
+  password?: string
+): Promise<OrchestrateDumpResult> {
+  const r = await callRpc("orchestrate.dump", {
+    orchId: orchId.trim(),
+    ...(password ? { password } : {}),
+  });
   if (!r.ok || !r.payload) {
     return {
       ok: false,
@@ -977,14 +995,77 @@ export async function orchestrateDump(orchId: string): Promise<OrchestrateDumpRe
       errorCode: r.error?.code,
     };
   }
-  const p = r.payload as { orchId?: string; filename?: string; zipBase64?: string; sizeBytes?: number };
+  const p = r.payload as {
+    orchId?: string;
+    filename?: string;
+    zipBase64?: string;
+    sizeBytes?: number;
+    encrypted?: boolean;
+  };
   return {
     ok: true,
     orchId: String(p.orchId ?? ""),
     filename: String(p.filename ?? "orch-dump.zip"),
     zipBase64: String(p.zipBase64 ?? ""),
     sizeBytes: Number(p.sizeBytes ?? 0),
+    encrypted: Boolean(p.encrypted),
   };
+}
+
+export type OrchestrateImportBundleResult =
+  | {
+      ok: true;
+      orchId: string;
+      name: string;
+      sessionKey: string;
+      status: string;
+      participants: string[];
+    }
+  | { ok: false; error?: string; errorCode?: string };
+
+/** Import a bundle (plain ZIP or password-encrypted ``.orchbundle``) as a new orchestration. */
+export async function orchestrateImportBundle(
+  zipBase64: string,
+  options?: { password?: string; restoreHomeWorkspace?: boolean }
+): Promise<OrchestrateImportBundleResult> {
+  const r = await callRpc("orchestrate.import_bundle", {
+    zipBase64,
+    password: options?.password ?? "",
+    restoreHomeWorkspace: options?.restoreHomeWorkspace === true,
+  });
+  if (!r.ok || !r.payload) {
+    return {
+      ok: false,
+      error: r.error?.message || "orchestrate.import_bundle failed",
+      errorCode: r.error?.code,
+    };
+  }
+  const p = r.payload as {
+    orchId?: string;
+    name?: string;
+    sessionKey?: string;
+    status?: string;
+    participants?: string[];
+  };
+  return {
+    ok: true,
+    orchId: String(p.orchId ?? ""),
+    name: String(p.name ?? ""),
+    sessionKey: String(p.sessionKey ?? ""),
+    status: String(p.status ?? ""),
+    participants: Array.isArray(p.participants) ? p.participants : [],
+  };
+}
+
+/** Large file → base64 without stack overflow (client components only). */
+export function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunk = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }
 
 /** Browser download for ``orchestrateDump`` payload (client components only). */
@@ -993,7 +1074,8 @@ export function downloadZipFromBase64(zipBase64: string, filename: string): void
   const binaryString = atob(zipBase64);
   const bytes = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-  const blob = new Blob([bytes], { type: "application/zip" });
+  const mime = filename.endsWith(".orchbundle") ? "application/octet-stream" : "application/zip";
+  const blob = new Blob([bytes], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -1046,6 +1128,7 @@ export type OrchestrateGetResult =
       orchReplyLanguage?: OrchestrateReplyLanguage;
       orchTraceEnabled?: boolean;
       orchTraceSeq?: number;
+      orchWorkspaceRoot?: string;
     }
   | { ok: false; error?: string };
 
@@ -1121,6 +1204,69 @@ export async function orchestrateGet(orchId: string): Promise<OrchestrateGetResu
     })(),
     orchTraceEnabled: Boolean(p.orchTraceEnabled),
     orchTraceSeq: typeof p.orchTraceSeq === "number" ? p.orchTraceSeq : Number(p.orchTraceSeq ?? 0) || 0,
+    orchWorkspaceRoot:
+      p.orchWorkspaceRoot != null && String(p.orchWorkspaceRoot).trim()
+        ? String(p.orchWorkspaceRoot).trim()
+        : undefined,
+  };
+}
+
+export type OrchestrateWorkspaceScanEntry = {
+  relPath: string;
+  isDir: boolean;
+  mtimeMs: number;
+  size: number;
+};
+
+export type OrchestrateWorkspaceScanResult =
+  | { ok: true; orchId: string; root: string | null; entries: OrchestrateWorkspaceScanEntry[]; truncated: boolean }
+  | { ok: false; error?: string };
+
+export async function orchestrateWorkspaceScan(orchId: string): Promise<OrchestrateWorkspaceScanResult> {
+  const r = await callRpc("orchestrate.workspace.scan", { orchId: orchId.trim() });
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "orchestrate.workspace.scan failed" };
+  }
+  const p = r.payload as {
+    orchId?: string;
+    root?: string | null;
+    entries?: OrchestrateWorkspaceScanEntry[];
+    truncated?: boolean;
+  };
+  return {
+    ok: true,
+    orchId: String(p.orchId ?? ""),
+    root: p.root != null && String(p.root).trim() ? String(p.root) : null,
+    entries: Array.isArray(p.entries) ? p.entries : [],
+    truncated: Boolean(p.truncated),
+  };
+}
+
+export type OrchestrateWorkspaceRootSetResult =
+  | { ok: true; orchId: string; orchWorkspaceRoot?: string }
+  | { ok: false; error?: string };
+
+/** Set or clear shared orchestration workspace directory (gateway host path). Refuses while running. */
+export async function orchestrateWorkspaceRootSet(
+  orchId: string,
+  workspaceRoot: string | null | undefined
+): Promise<OrchestrateWorkspaceRootSetResult> {
+  const trimmed = (workspaceRoot ?? "").trim();
+  const r = await callRpc("orchestrate.workspace_root.set", {
+    orchId: orchId.trim(),
+    orchWorkspaceRoot: trimmed,
+  });
+  if (!r.ok || !r.payload) {
+    return { ok: false, error: r.error?.message || "orchestrate.workspace_root.set failed" };
+  }
+  const p = r.payload as { orchId?: string; orchWorkspaceRoot?: string };
+  return {
+    ok: true,
+    orchId: String(p.orchId ?? ""),
+    orchWorkspaceRoot:
+      p.orchWorkspaceRoot != null && String(p.orchWorkspaceRoot).trim()
+        ? String(p.orchWorkspaceRoot).trim()
+        : undefined,
   };
 }
 

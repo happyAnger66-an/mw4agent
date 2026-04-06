@@ -21,12 +21,11 @@ DEFAULT_AGENT_ID = "main"
 def _default_state_dir_home(home: Path) -> Path:
     """Pick existing state root under home, else default ``~/.orbit``.
 
-    Order: ``~/.orbit`` → ``~/orbit`` (non-hidden legacy).
+    Order: ``~/.orbit`` → ``~/.mw4agent`` (legacy) → ``~/orbit`` (non-hidden legacy).
 
-    ``~/.mw4agent`` is no longer auto-selected: set ``MW4AGENT_STATE_DIR`` (or
-    ``ORBIT_STATE_DIR``) to keep using a legacy tree, or migrate data to ``~/.orbit``.
+    Override anytime with ``ORBIT_STATE_DIR`` / ``MW4AGENT_STATE_DIR``.
     """
-    candidates = (home / ".orbit", home / "orbit")
+    candidates = (home / ".orbit", home / ".mw4agent", home / "orbit")
     for p in candidates:
         if p.exists():
             return p.resolve()
@@ -38,9 +37,8 @@ def get_state_dir() -> str:
 
     ORBIT_STATE_DIR takes precedence; MW4AGENT_STATE_DIR is accepted for backward compatibility.
 
-    If neither is set, uses the first existing directory among ``~/.orbit`` and ``~/orbit``,
-    else ``~/.orbit`` (even when it does not exist yet). Legacy ``~/.mw4agent`` is not
-    chosen automatically; point ``MW4AGENT_STATE_DIR`` there if you still need that tree.
+    If neither is set, uses the first existing directory among ``~/.orbit``, ``~/.mw4agent``,
+    and ``~/orbit``; if none exist, ``~/.orbit`` is the default path (created on demand by callers).
     """
     raw = os.environ.get("ORBIT_STATE_DIR") or os.environ.get("MW4AGENT_STATE_DIR")
     if raw and raw.strip():

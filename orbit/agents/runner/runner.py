@@ -133,10 +133,10 @@ def _merge_llm_usage(a: LLMUsage, b: LLMUsage) -> LLMUsage:
 
 
 def _resolve_run_workspace_dir(params: AgentRunParams) -> str:
-    """Tools/memory/transcript cwd when params.workspace_dir is unset.
+    """Agent workspace for skills snapshot, memory index, MEMORY bootstrap, transcripts when unset.
 
-    Aligns with multi-agent layout: ~/.orbit/agents/<agentId>/workspace/
-    (unless ORBIT_WORKSPACE_DIR globally overrides — see resolve_agent_workspace_dir).
+    Tool exec/read/write cwd may differ via ``params.tool_workspace_dir`` (applied later in the turn).
+    Aligns with: ~/.orbit/agents/<agentId>/workspace/ (unless ORBIT_WORKSPACE_DIR overrides).
     """
     wd = params.workspace_dir
     if wd is not None and str(wd).strip():
@@ -546,6 +546,15 @@ class AgentRunner:
             directory_isolation_active = True
         else:
             tool_workspace_dir = agent_workspace_dir
+
+        # Orchestration (or other callers) may set a separate project dir for exec/read/write only.
+        tw_opt = getattr(params, "tool_workspace_dir", None)
+        if (
+            not directory_isolation_active
+            and tw_opt is not None
+            and str(tw_opt).strip()
+        ):
+            tool_workspace_dir = os.path.abspath(str(tw_opt).strip())
 
         fs_policy = resolve_tool_fs_policy_config(cfg_mgr)
         tools_fs_workspace_only_effective = (
