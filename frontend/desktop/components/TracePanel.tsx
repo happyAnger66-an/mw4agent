@@ -14,6 +14,7 @@ import {
 import {
   formatOrchTraceSummary,
   formatTraceEventTs,
+  traceEventAgentId,
   traceEventTypeClass,
 } from "@/lib/orchestrateTraceFormat";
 import { useI18n } from "@/lib/i18n";
@@ -59,6 +60,7 @@ export function TracePanel() {
   const [events, setEvents] = useState<OrchTraceEvent[]>([]);
   const [traceFilterStart, setTraceFilterStart] = useState("");
   const [traceFilterEnd, setTraceFilterEnd] = useState("");
+  const [traceFilterAgentId, setTraceFilterAgentId] = useState("");
   const [expandedSeq, setExpandedSeq] = useState<number | null>(null);
   const afterSeqRef = useRef(-1);
 
@@ -82,6 +84,7 @@ export function TracePanel() {
     setEvents([]);
     setTraceFilterStart("");
     setTraceFilterEnd("");
+    setTraceFilterAgentId("");
     setExpandedSeq(null);
     setTraceEnabled(null);
     setStatus("");
@@ -131,28 +134,49 @@ export function TracePanel() {
   const doRefreshFull = useCallback(() => {
     afterSeqRef.current = -1;
     setEvents([]);
+    setTraceFilterAgentId("");
     setExpandedSeq(null);
   }, []);
 
-  const { filteredEvents, traceTimeFilterApplied } = useMemo(() => {
+  const { filteredEvents, traceTimeFilterApplied, traceAgentFilterApplied } = useMemo(() => {
     const startMs = parseDatetimeLocalMs(traceFilterStart);
     const endMsRaw = parseDatetimeLocalMs(traceFilterEnd);
     // datetime-local is minute-precision; include the full end minute.
     const endMs = endMsRaw != null ? endMsRaw + 60 * 1000 - 1 : null;
-    const applied = startMs != null || endMsRaw != null;
-    if (!applied) return { filteredEvents: events, traceTimeFilterApplied: false };
-    const filtered = events.filter((ev) => {
-      const ts = traceEventTsMs(ev);
-      if (ts == null) return false;
-      if (startMs != null && ts < startMs) return false;
-      if (endMs != null && ts > endMs) return false;
-      return true;
-    });
-    return { filteredEvents: filtered, traceTimeFilterApplied: true };
-  }, [events, traceFilterStart, traceFilterEnd]);
+    const timeApplied = startMs != null || endMsRaw != null;
+    let rows = events;
+    if (timeApplied) {
+      rows = rows.filter((ev) => {
+        const ts = traceEventTsMs(ev);
+        if (ts == null) return false;
+        if (startMs != null && ts < startMs) return false;
+        if (endMs != null && ts > endMs) return false;
+        return true;
+      });
+    }
+    const agentSel = traceFilterAgentId.trim();
+    const agentApplied = agentSel !== "";
+    if (agentApplied) {
+      rows = rows.filter((ev) => traceEventAgentId(ev) === agentSel);
+    }
+    return {
+      filteredEvents: rows,
+      traceTimeFilterApplied: timeApplied,
+      traceAgentFilterApplied: agentApplied,
+    };
+  }, [events, traceFilterStart, traceFilterEnd, traceFilterAgentId]);
 
   const traceTimeFilterInputsDirty =
     traceFilterStart.trim() !== "" || traceFilterEnd.trim() !== "";
+
+  const traceAgentOptions = useMemo(() => {
+    const s = new Set<string>();
+    for (const ev of events) {
+      const id = traceEventAgentId(ev);
+      if (id) s.add(id);
+    }
+    return Array.from(s).sort((a, b) => a.localeCompare(b));
+  }, [events]);
 
   const traceUsageStats = useMemo(
     () => computeTraceUsageStats(filteredEvents),
@@ -254,8 +278,11 @@ export function TracePanel() {
               </span>
               <span>
                 {t("traceEventsLoaded")}: {events.length}
-                {traceTimeFilterApplied && events.length > 0
-                  ? ` · ${t("traceFilterShowing", { filtered: filteredEvents.length, total: events.length })}`
+                {(traceTimeFilterApplied || traceAgentFilterApplied) && events.length > 0
+                  ? ` · ${t("traceFilterShowing", {
+                      filtered: String(filteredEvents.length),
+                      total: String(events.length),
+                    })}`
                   : ""}
               </span>
             </div>
@@ -278,6 +305,21 @@ export function TracePanel() {
                   className="px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] font-mono text-[11px] max-w-full"
                 />
               </label>
+              <label className="flex flex-col gap-0.5 min-w-0">
+                <span className="text-[10px] text-[var(--muted)]">{t("traceFilterAgent")}</span>
+                <select
+                  value={traceFilterAgentId}
+                  onChange={(e) => setTraceFilterAgentId(e.target.value)}
+                  className="px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg)] text-[var(--text)] font-mono text-[11px] max-w-[min(100%,220px)]"
+                >
+                  <option value="">{t("traceFilterAgentAll")}</option>
+                  {traceAgentOptions.map((aid) => (
+                    <option key={aid} value={aid}>
+                      {aid}
+                    </option>
+                  ))}
+                </select>
+              </label>
               {traceTimeFilterInputsDirty ? (
                 <button
                   type="button"
@@ -295,7 +337,7 @@ export function TracePanel() {
             <div className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--panel)] p-3 space-y-0">
               {events.length === 0 ? (
                 <p className="text-xs text-[var(--muted)] py-6 text-center">{t("orchestrateTraceEmpty")}</p>
-              ) : traceTimeFilterApplied && filteredEvents.length === 0 ? (
+              ) : events.length > 0 && filteredEvents.length === 0 ? (
                 <p className="text-xs text-[var(--muted)] py-6 text-center">{t("traceFilterNoMatches")}</p>
               ) : (
                 <ul className="relative pl-4 border-l-2 border-[var(--border)] space-y-3 ml-2 py-1">

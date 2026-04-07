@@ -1,8 +1,16 @@
 import type { OrchTraceEvent } from "@/lib/gateway";
 
+/** Top-level agent id on trace rows (camelCase in JSON; ``user_message`` uses ``user``). */
+export function traceEventAgentId(ev: OrchTraceEvent): string {
+  const o = ev as Record<string, unknown>;
+  const raw = o.agentId ?? o.agent_id;
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  return "";
+}
+
 export function formatOrchTraceSummary(ev: OrchTraceEvent): string {
   const typ = String(ev.type ?? "");
-  const agent = String(ev.agentId ?? "");
+  const agent = traceEventAgentId(ev);
   const round = ev.orchRound != null ? `r${Number(ev.orchRound)}` : "";
   const node = ev.nodeId != null ? ` · ${String(ev.nodeId)}` : "";
   const pl = ev.payload;
