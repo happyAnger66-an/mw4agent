@@ -68,6 +68,7 @@ from ..session.transcript import (
 from ..tools.web_search_tool import is_web_search_enabled
 from ..tools.apply_patch_tool import is_apply_patch_enabled
 from ..tools.web_fetch_tool import is_web_fetch_enabled
+from ..tools.todo_store import append_todos_snapshot_to_prompt
 
 MAX_TOOL_ROUNDS = 30
 TOOL_PROCESSING_START_SEC = 30.0
@@ -597,6 +598,17 @@ class AgentRunner:
             params_for_llm = replace(params, message=composed_for_llm)
         else:
             params_for_llm = params
+
+        # Persisted todos (incl. orchestration shared_todos.json): inject snapshot
+        # so every agent turn — including multi-agent hand-offs — sees current checklist.
+        _snap = append_todos_snapshot_to_prompt(
+            params_for_llm.extra_system_prompt,
+            session_key=params_for_llm.session_key,
+            session_id=str(session_entry.session_id),
+            agent_workspace_dir=agent_workspace_dir,
+        )
+        if _snap != params_for_llm.extra_system_prompt:
+            params_for_llm = replace(params_for_llm, extra_system_prompt=_snap)
 
         # --- Minimal tool-call protocol ------------------------------------
         #

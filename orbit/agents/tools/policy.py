@@ -197,6 +197,7 @@ def _profile_allow_list(profile: str) -> List[str]:
     return [
         "read",
         "write",
+        "todo_write",
         "memory_search",
         "memory_get",
         "memory_write",

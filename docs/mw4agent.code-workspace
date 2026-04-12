@@ -17,6 +17,9 @@
 		},
 		{
 			"path": "../../Claw-AI-Lab"
+		},
+		{
+			"path": "../../hermes-agent"
 		}
 	],
 	"settings": {}

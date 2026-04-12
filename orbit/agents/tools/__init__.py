@@ -11,6 +11,7 @@ from .web_fetch_tool import WebFetchTool
 from .exec_tool import ExecTool
 from .process_tool import ProcessTool
 from .apply_patch_tool import ApplyPatchTool, is_apply_patch_enabled
+from .todo_write_tool import TodoWriteTool
 
 
 def _register_builtin_tools() -> None:
@@ -18,6 +19,7 @@ def _register_builtin_tools() -> None:
     for tool in (
         ReadTool(),
         WriteTool(),
+        TodoWriteTool(),
         ApplyPatchTool(),
         MemorySearchTool(),
         MemoryGetTool(),
@@ -51,4 +53,5 @@ __all__ = [
     "ProcessTool",
     "ApplyPatchTool",
     "is_apply_patch_enabled",
+    "TodoWriteTool",
 ]
