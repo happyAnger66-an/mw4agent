@@ -20,6 +20,9 @@
 		},
 		{
 			"path": "../../hermes-agent"
+		},
+		{
+			"path": "../../../auto_hpc_agent/cuda-optimized-skill/skills/optimized-skill"
 		}
 	],
 	"settings": {}

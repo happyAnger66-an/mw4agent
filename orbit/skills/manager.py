@@ -8,7 +8,6 @@ formats for OpenClaw compatibility.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,6 +20,19 @@ from .format_md import parse_skill_markdown
 SKILL_MD_FILENAME = "SKILL.md"
 
 
+def _is_skill_bundle_parent_dir(dir_path: Path) -> bool:
+    """True when ``dir_path`` is a *-skill bundle root (children hold SKILL.md).
+
+    Layout: ``<skillsDir>/<name>-skill/<child>/SKILL.md``. If the parent directory
+    itself contains ``SKILL.md``, it is treated as a normal single skill only.
+    """
+    return (
+        dir_path.is_dir()
+        and dir_path.name.endswith("-skill")
+        and not (dir_path / SKILL_MD_FILENAME).exists()
+    )
+
+
 class SkillManager:
     """Manages Orbit skill files with encryption support.
 
@@ -28,6 +40,7 @@ class SkillManager:
     Supports:
       - JSON: ``<name>.json`` (encrypted or plaintext).
       - Markdown: ``<name>.md`` or ``<name>/SKILL.md`` (OpenClaw-compatible, plaintext).
+      - Bundle: ``<name>-skill/<child>/SKILL.md`` or ``<name>-skill/<child>.json`` / ``.md`` under the parent (parent must not contain ``SKILL.md``); logical name ``<name>-skill/<child>``.
     """
 
     def __init__(self, skills_dir: Optional[str] = None) -> None:
@@ -54,9 +67,30 @@ class SkillManager:
         """Resolve skill name to (path, format). format is 'json' or 'md'.
 
         Tries in order: <name>.json, <name>.md, <name>/SKILL.md.
+        For nested names ``parent/child`` (bundle layout): under ``parent/`` try
+        ``child.json``, ``child.md``, ``child/SKILL.md``.
         """
         base = self._normalize_name(name)
-        candidates: List[Tuple[Path, str]] = [
+        if "/" in base:
+            parts = [p for p in base.split("/") if p and p not in (".", "..")]
+            if len(parts) >= 2:
+                parent_dir = self.skills_dir / parts[0]
+                # Nested layout is only for ``*-skill`` bundle roots with no parent SKILL.md.
+                if not _is_skill_bundle_parent_dir(parent_dir):
+                    return None
+                prefix = self.skills_dir.joinpath(*parts[:-1])
+                leaf = parts[-1]
+                candidates: List[Tuple[Path, str]] = [
+                    (prefix / f"{leaf}.json", "json"),
+                    (prefix / f"{leaf}.md", "md"),
+                    (prefix / leaf / SKILL_MD_FILENAME, "md"),
+                ]
+                for path, fmt in candidates:
+                    if path.exists():
+                        return (path, fmt)
+                return None
+
+        candidates = [
             (self.skills_dir / f"{base}.json", "json"),
             (self.skills_dir / f"{base}.md", "md"),
             (self.skills_dir / base / SKILL_MD_FILENAME, "md"),
@@ -69,6 +103,10 @@ class SkillManager:
     def _get_skill_path(self, name: str) -> Path:
         """Get path for a JSON skill file (used for write and delete)."""
         base = self._normalize_name(name)
+        if "/" in base:
+            parts = [p for p in base.split("/") if p and p not in (".", "..")]
+            if len(parts) >= 2:
+                return self.skills_dir.joinpath(*parts[:-1]) / f"{parts[-1]}.json"
         return self.skills_dir / f"{base}.json"
 
     def read_skill(self, name: str) -> Optional[Dict[str, Any]]:
@@ -151,7 +189,12 @@ class SkillManager:
         return False
 
     def list_skills(self) -> List[str]:
-        """List all skill names (JSON, .md, and <name>/SKILL.md; deduplicated by name)."""
+        """List all skill names (JSON, .md, and <name>/SKILL.md; deduplicated by name).
+
+        Also supports bundle roots named ``*-skill``: when the parent has no
+        ``SKILL.md``, each immediate subdirectory that contains ``SKILL.md`` is
+        listed as ``<parent>/<child>``.
+        """
         if not self.skills_dir.exists():
             return []
         seen: set = set()
@@ -160,9 +203,20 @@ class SkillManager:
         for path in self.skills_dir.glob("*.md"):
             seen.add(path.stem)
         for path in self.skills_dir.iterdir():
-            if path.is_dir():
-                if (path / SKILL_MD_FILENAME).exists():
-                    seen.add(path.name)
+            if not path.is_dir():
+                continue
+            if (path / SKILL_MD_FILENAME).exists():
+                seen.add(path.name)
+                continue
+            if _is_skill_bundle_parent_dir(path):
+                for sub in path.iterdir():
+                    if sub.name.startswith("."):
+                        continue
+                    if sub.is_dir():
+                        if (sub / SKILL_MD_FILENAME).exists():
+                            seen.add(f"{path.name}/{sub.name}")
+                    elif sub.is_file() and sub.suffix in (".json", ".md"):
+                        seen.add(f"{path.name}/{sub.stem}")
         return sorted(seen)
 
     def read_all_skills(self) -> Dict[str, Dict[str, Any]]:
